@@ -1,0 +1,12 @@
+meta:
+  environment: node
+  toolchain:
+    name: node
+    version: 20
+build:
+  requirements:
+    - package.json
+  steps:
+    - npm install
+run:
+  command: node server.js
