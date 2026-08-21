@@ -6,8 +6,7 @@
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background: #f0f2f5; }
         #chat { max-width: 500px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        #messages { list-style-type: none; padding: 0; height: 300px; overflow-y: auto; border: 1px solid #ddd; background: #fafafa; margin-bottom: 10px; padding: 10px; border-radius: 4px; }
-        #messages li { padding: 8px; margin-bottom: 5px; background: #e2f7cb; border-radius: 5px; width: fit-content; max-width: 80%; }
+        #messages { list-style-type: none; padding: 0; height: 300px; overflow-y: auto; border: 1px solid #ddd; background: #fafafa; margin-bottom: 10px; padding: 10px; border-radius: 4px; display: flex; flex-direction: column; }
         #form { display: flex; }
         #input { flex-grow: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px 0 0 4px; outline: none; }
         #btn { padding: 10px 20px; border: none; background: #0084ff; color: white; border-radius: 0 4px 4px 0; cursor: pointer; }
@@ -22,30 +21,71 @@
     </form>
 </div>
 
-<!-- Подключаем инструменты для живой связи -->
-<script src="/socket.io/socket.io.js"></script>
+<!-- Подключаем библиотеку для связи с удаленным сервером Render -->
+<script src="https://socket.io"></script>
 <script>
-    const socket = io();
+    // Спрашиваем имя пользователя при входе на сайт
+    let name = prompt("Введите ваше имя для входа в чат:") || "Аноним";
+
+    // Подключаемся напрямую к вашему серверу на Render
+    const socket = io('https://onrender.com');
+
     const form = document.getElementById('form');
     const input = document.getElementById('input');
     const messages = document.getElementById('messages');
+
+    // Функция, которая наводит красоту и красит сообщения в нужные цвета
+    function appendMessage(data) {
+        const item = document.createElement('li');
+        item.textContent = `${data.name}: ${data.text}`;
+        
+        // Стилизуем пузырь сообщения
+        item.style.borderRadius = '12px';
+        item.style.padding = '8px 12px';
+        item.style.marginBottom = '8px';
+        item.style.display = 'block';
+        item.style.width = 'fit-content';
+        item.style.maxWidth = '75%';
+        item.style.color = '#ffffff';
+
+        // Проверяем, кто автор сообщения
+        if (data.name === name) {
+            // Ваши сообщения: коричневые, прижаты вправо
+            item.style.background = '#8B4513'; 
+            item.style.marginLeft = 'auto';
+        } else {
+            // Сообщения друга: тёмно-зелёные, прижаты влево
+            item.style.background = '#006400';
+            item.style.marginRight = 'auto';
+        }
+
+        messages.appendChild(item);
+        messages.scrollTop = messages.scrollHeight; // Прокручиваем чат вниз
+    }
+
+    // 1. Приём старой истории сообщений с сервера при входе
+    socket.on('history', (history) => {
+        messages.innerHTML = ''; // Очищаем экран перед выводом истории
+        history.forEach(data => {
+            appendMessage(data);
+        });
+    });
+
+    // 2. Приём новых живых сообщений от сервера
+    socket.on('message', (data) => {
+        appendMessage(data);
+    });
 
     // Когда нажимаем кнопку Отправить
     form.addEventListener('submit', (e) => {
         e.preventDefault(); // Отменяем перезагрузку страницы
         if (input.value) {
-            socket.emit('chat message', input.value); // Отправляем текст на сервер
+            // Отправляем на сервер объект с именем и текстом
+            socket.emit('message', { name: name, text: input.value }); 
             input.value = ''; // Очищаем поле ввода
         }
-    });
-
-    // Когда от сервера прилетает новое сообщение
-    socket.on('chat message', (msg) => {
-        const item = document.createElement('li');
-        item.textContent = msg;
-        messages.appendChild(item);
-        messages.scrollTop = messages.scrollHeight; // Прокручиваем чат вниз
     });
 </script>
 </body>
 </html>
+

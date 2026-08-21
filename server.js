@@ -1,30 +1,35 @@
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const fs = require('fs');
+
 const app = express();
-const http = require('http').createServer(app);
-const io = require('socket.io')(http);
-
-// Говорим серверу показать файл index.html, когда кто-то заходит на сайт
-app.get('/', (req, res) => {
-    res.sendFile(__dirname + '/index.html');
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*" } 
 });
 
-// Слушаем подключения от пользователей
+const HISTORY_FILE = 'chat-history.json';
+let messagesHistory = [];
+
+if (fs.existsSync(HISTORY_FILE)) {
+  try {
+    messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+  } catch (e) {
+    messagesHistory = [];
+  }
+}
+
 io.on('connection', (socket) => {
-    console.log('Кто-то подключился к чату!');
+  socket.emit('history', messagesHistory);
 
-    // Когда сервер получает сообщение 'chat message', он пересылает его ВСЕМ
-    socket.on('chat message', (msg) => {
-        io.emit('chat message', msg);
-    });
-
-    // Когда пользователь закрывает вкладку
-    socket.on('disconnect', () => {
-        console.log('Пользователь ушел из чата');
-    });
+  socket.on('message', (data) => {
+    messagesHistory.push(data);
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2));
+    io.emit('message', data);
+  });
 });
 
-const PORT = process.env.PORT || 3000;
-http.listen(PORT, () => {
-    console.log('Сервер успешно запущен на порту ' + PORT);
+server.listen(3000, () => {
+  console.log('Сервер запущен на порту 3000');
 });
-
