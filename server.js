@@ -1,12 +1,16 @@
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
 const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" } 
+
+// Разрешаем Hugging Face обмениваться данными с сервером
+app.use(express.json());
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+  next();
 });
 
 const HISTORY_FILE = 'chat-history.json';
@@ -20,16 +24,23 @@ if (fs.existsSync(HISTORY_FILE)) {
   }
 }
 
-io.on('connection', (socket) => {
-  socket.emit('history', messagesHistory);
+// Отдаем историю сообщений
+app.get('/history', (req, res) => {
+  res.json(messagesHistory);
+});
 
-  socket.on('message', (data) => {
+// Принимаем новое сообщение
+app.post('/message', (req, res) => {
+  const data = req.body;
+  if (data && data.name && data.text) {
     messagesHistory.push(data);
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2));
-    io.emit('message', data);
-  });
+    res.json(data);
+  } else {
+    res.status(400).json({ error: "Неверный формат данных" });
+  }
 });
 
 server.listen(3000, () => {
-  console.log('Сервер запущен на порту 3000');
+  console.log('Сервер успешно запущен на порту 3000');
 });
