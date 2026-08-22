@@ -24,10 +24,12 @@ app.use((req, res, next) => {
 const HISTORY_FILE = path.join(__dirname, 'chat-history.json');
 const USERS_FILE = path.join(__dirname, 'users.json');
 const GROUPS_FILE = path.join(__dirname, 'groups.json');
+const UNREAD_FILE = path.join(__dirname, 'unread.json');
 
 let messagesHistory = [];
 let usersDatabase = {}; 
 let groupsDatabase = {}; 
+let unreadDatabase = {}; // { userId: { chatId: count } }
 let onlineUsersMap = new Map();
 
 // Чтение файлов
@@ -40,6 +42,9 @@ if (fs.existsSync(USERS_FILE)) {
 if (fs.existsSync(GROUPS_FILE)) {
     try { groupsDatabase = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')); } catch (e) {}
 }
+if (fs.existsSync(UNREAD_FILE)) {
+    try { unreadDatabase = JSON.parse(fs.readFileSync(UNREAD_FILE, 'utf8')); } catch (e) {}
+}
 
 function saveHistory() { 
     try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2)); } catch (e) {}
@@ -50,6 +55,25 @@ function saveUsers() {
 function saveGroups() { 
     try { fs.writeFileSync(GROUPS_FILE, JSON.stringify(groupsDatabase, null, 2)); } catch (e) {}
 }
+function saveUnread() { 
+    try { fs.writeFileSync(UNREAD_FILE, JSON.stringify(unreadDatabase, null, 2)); } catch (e) {}
+}
+
+// ПОЛУЧЕНИЕ НЕПРОЧИТАННЫХ ДЛЯ ПОЛЬЗОВАТЕЛЯ
+app.get('/unread/:userId', (req, res) => {
+    const userId = req.params.userId;
+    res.json(unreadDatabase[userId] || {});
+});
+
+// СБРОС НЕПРОЧИТАННЫХ ДЛЯ ЧАТА
+app.post('/unread/reset', (req, res) => {
+    const { userId, chatId } = req.body;
+    if (unreadDatabase[userId]) {
+        delete unreadDatabase[userId][chatId];
+        saveUnread();
+    }
+    res.json({ success: true });
+});
 
 // РЕГИСТРАЦИЯ
 app.post('/register', (req, res) => {
@@ -302,7 +326,7 @@ app.put('/message/:id', (req, res) => {
     res.json({ success: true });
 });
 
-// SOCKET.IO — ГАРАНТИРОВАННАЯ РАССЫЛКА
+// SOCKET.IO
 io.on('connection', (socket) => {
     console.log('Подключение:', socket.id);
     
