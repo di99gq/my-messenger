@@ -1,7 +1,7 @@
 const express = require('express');
 const http = require('http');
 const fs = require('fs');
-const compression = require('compression'); // Добавлено: сжатие трафика
+const compression = require('compression'); // Сжатие трафика
 
 const app = express();
 const server = http.createServer(app);
@@ -15,7 +15,8 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  // Добавлено: разрешаем метод DELETE
+  res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
@@ -44,8 +45,6 @@ app.post('/message', (req, res) => {
   if (data && data.name && (data.text || data.file)) {
     messagesHistory.push(data);
     
-    // ВНИМАНИЕ: Из-за тяжелых файлов лимит истории снижен до 30, 
-    // иначе сервер Render упадет по памяти (Out of Memory)
     if (messagesHistory.length > 30) {
       messagesHistory.shift();
     }
@@ -57,6 +56,24 @@ app.post('/message', (req, res) => {
     res.json(data);
   } else {
     res.status(400).json({ error: "Неверный формат данных" });
+  }
+});
+
+// Добавлено: эндпоинт для удаления сообщения по ID
+app.delete('/message/:id', (req, res) => {
+  const messageId = req.params.id;
+  const initialLength = messagesHistory.length;
+  
+  // Оставляем в истории только те сообщения, у которых ID не совпадает с удаляемым
+  messagesHistory = messagesHistory.filter(msg => String(msg.id) !== String(messageId));
+
+  if (messagesHistory.length !== initialLength) {
+    fs.writeFile(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2), (err) => {
+      if (err) console.error("Ошибка записи файла истории:", err);
+    });
+    res.json({ success: true, id: messageId });
+  } else {
+    res.status(404).json({ error: "Сообщение не найдено" });
   }
 });
 
