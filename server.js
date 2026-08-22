@@ -5,18 +5,14 @@ const path = require('path');
 const { Server } = require('socket.io');
 
 const app = express();
-
-// Создаем HTTP-сервер на базе Express приложения
 const server = http.createServer(app);
-
-// Инициализируем Socket.io, привязав его строго к HTTP-серверу
 const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 app.use(express.json({ limit: '50mb' }));
 
-// Настройка CORS для HTTP запросов
+// CORS
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -30,9 +26,9 @@ const USERS_FILE = path.join(__dirname, 'users.json');
 
 let messagesHistory = [];
 let usersDatabase = {}; 
-let onlineUsersMap = new Map(); // Карта активных пользователей (userId -> socket.id)
+let onlineUsersMap = new Map();
 
-// Чтение файлов базы данных с диска
+// Чтение файлов
 if (fs.existsSync(HISTORY_FILE)) {
     try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch (e) {}
 }
@@ -41,22 +37,13 @@ if (fs.existsSync(USERS_FILE)) {
 }
 
 function saveHistory() { 
-    try {
-        fs.writeFileSync(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2));
-    } catch (e) {
-        console.error('Ошибка сохранения истории:', e);
-    }
+    try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2)); } catch (e) {}
 }
-
 function saveUsers() { 
-    try {
-        fs.writeFileSync(USERS_FILE, JSON.stringify(usersDatabase, null, 2));
-    } catch (e) {
-        console.error('Ошибка сохранения пользователей:', e);
-    }
+    try { fs.writeFileSync(USERS_FILE, JSON.stringify(usersDatabase, null, 2)); } catch (e) {}
 }
 
-// РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ
+// РЕГИСТРАЦИЯ
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
@@ -73,12 +60,11 @@ app.post('/register', (req, res) => {
     };
     saveUsers();
 
-    // Сразу отправляем нового пользователя всем, кто сейчас в сети
     io.emit('user_registered', { id: userId, name: username.trim(), avatar: null });
     res.json({ success: true, userId, name: username.trim(), avatar: null });
 });
 
-// ВХОД В СИСТЕМУ
+// ВХОД
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
     const keyName = username.trim().toLowerCase();
@@ -90,13 +76,13 @@ app.post('/login', (req, res) => {
     res.json({ success: true, userId: user.id, name: user.name, avatar: user.avatar });
 });
 
-// ПОЛУЧЕНИЕ ВСЕХ ЗАРЕГИСТРИРОВАННЫХ ПОЛЬЗОВАТЕЛЕЙ СИСТЕМЫ
+// ПОЛУЧЕНИЕ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
 app.get('/users', (req, res) => {
     const list = Object.values(usersDatabase).map(u => ({ id: u.id, name: u.name, avatar: u.avatar || null }));
     res.json(list);
 });
 
-// ЗАГРУЗКА ИСТОРИИ КОНКРЕТНОГО ДИАЛОГА
+// ИСТОРИЯ СООБЩЕНИЙ
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
     const log = messagesHistory.filter(msg => {
@@ -106,13 +92,10 @@ app.get('/history', (req, res) => {
     res.json(log);
 });
 
-// ОБНОВЛЕНИЕ АВАТАРКИ ПРОФИЛЯ
+// ОБНОВЛЕНИЕ АВАТАРКИ
 app.post('/avatar', (req, res) => {
     const { userId, avatarData } = req.body;
-    
-    if (!userId || !avatarData) {
-        return res.status(400).json({ error: "Недостаточно данных" });
-    }
+    if (!userId || !avatarData) return res.status(400).json({ error: "Недостаточно данных" });
     
     Object.keys(usersDatabase).forEach(key => {
         if (usersDatabase[key].id === userId) usersDatabase[key].avatar = avatarData;
@@ -130,67 +113,44 @@ app.delete('/message/:id', (req, res) => {
     res.json({ success: true });
 });
 
-// ЛОГИКА МГНОВЕННОГО ОБМЕНА СООБЩЕНИЯМИ
+// SOCKET.IO
 io.on('connection', (socket) => {
-    console.log('Пользователь подключился:', socket.id);
+    console.log('Подключение:', socket.id);
     
-    // Объявление пользователя в сети
     socket.on('iam_online', (userId) => {
         if (!userId) return;
-        
         socket.userId = userId;
         onlineUsersMap.set(userId, socket.id);
-        
-        // Отправляем обновленный список онлайн всем клиентам
         io.emit('online_list', Array.from(onlineUsersMap.keys()));
-        console.log('Пользователь', userId, 'в сети. Онлайн:', onlineUsersMap.size);
     });
 
-    // Прием и распределение сообщений
     socket.on('send_message', (msgData) => {
-        // Валидация данных
-        if (!msgData || !msgData.senderId || !msgData.receiverId) {
-            console.error('Невалидные данные сообщения:', msgData);
-            return;
-        }
+        if (!msgData || !msgData.senderId || !msgData.receiverId) return;
         
-        // Добавляем timestamp
         msgData.timestamp = Date.now();
-        
-        // Если нет id, генерируем
-        if (!msgData.id) {
-            msgData.id = 'msg_' + Date.now() + Math.random().toString(36).substr(2, 5);
-        }
+        if (!msgData.id) msgData.id = 'msg_' + Date.now() + Math.random().toString(36).substr(2, 5);
         
         messagesHistory.push(msgData);
         if (messagesHistory.length > 100) messagesHistory.shift();
         saveHistory();
 
-        // Отправляем автору сообщения для мгновенного рендеринга
         socket.emit('new_message', msgData);
 
-        // Если это не Избранное, отправляем получателю в режиме реального времени
         if (msgData.receiverId !== 'favorites') {
             const receiverSocketId = onlineUsersMap.get(msgData.receiverId);
             if (receiverSocketId) {
                 io.to(receiverSocketId).emit('new_message', msgData);
             }
         }
-        
-        console.log('Сообщение отправлено:', msgData.senderId, '->', msgData.receiverId);
     });
 
-    // Отключение от сети
     socket.on('disconnect', () => {
         if (socket.userId) {
             onlineUsersMap.delete(socket.userId);
             io.emit('online_list', Array.from(onlineUsersMap.keys()));
-            console.log('Пользователь', socket.userId, 'отключился. Онлайн:', onlineUsersMap.size);
         }
     });
 });
 
 const PORT = process.env.PORT || 3000;
-
-// Слушаем порт именно через HTTP-сервер
-server.listen(PORT, () => console.log(`Чистый чат-сервер успешно запущен на порту ${PORT}`));
+server.listen(PORT, () => console.log(`Сервер запущен на ${PORT}`));
