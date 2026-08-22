@@ -11,6 +11,7 @@ app.use(compression());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Настройка заголовков CORS для доступа к серверу
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -24,14 +25,16 @@ const USERS_FILE = path.join(__dirname, 'users.json');
 
 let messagesHistory = [];
 let usersDatabase = {}; 
-let activeUsers = {};   // Онлайн-пользователи
-let activeCalls = {};   // Текущие звонки в процессе { callId: { from, to, type, status, timestamp, sdp, ice } }
+let activeUsers = {};   // Хранилище онлайн-пользователей
+let activeCalls = {};   // Хранилище текущих звонков
 
+// Чтение истории сообщений с диска при старте
 if (fs.existsSync(HISTORY_FILE)) {
     try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } 
     catch (e) { messagesHistory = []; }
 }
 
+// Чтение базы пользователей с диска при старте
 if (fs.existsSync(USERS_FILE)) {
     try { usersDatabase = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } 
     catch (e) { usersDatabase = {}; }
@@ -48,8 +51,7 @@ function saveUsers() {
         if (err) console.error("Ошибка записи базы пользователей:", err);
     });
 }
-
-// РЕГИСТРАЦИЯ
+// РЕГИСТРАЦИЯ АККАУНТА
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
@@ -85,7 +87,8 @@ app.post('/login', (req, res) => {
 
     res.json({ success: true, userId: user.id, name: user.name, avatar: user.avatar });
 });
-// ПОИСК ПОЛЬЗОВАТЕЛЯ ПО НИКУ
+
+// ТОЧНЫЙ ИСПРАВЛЕННЫЙ ПОИСК ПОЛЬЗОВАТЕЛЯ ПО НИКУ
 app.get('/search-user', (req, res) => {
     const query = req.query.username;
     if (!query) return res.json([]);
@@ -93,16 +96,15 @@ app.get('/search-user', (req, res) => {
     const searchStr = query.trim().toLowerCase();
     const results = [];
 
-    Object.keys(usersDatabase).forEach(key => {
-        if (key.includes(searchStr)) {
-            const u = usersDatabase[key];
+    Object.values(usersDatabase).forEach(u => {
+        if (u.name.toLowerCase().includes(searchStr)) {
             results.push({ id: u.id, name: u.name, avatar: u.avatar });
         }
     });
     res.json(results);
 });
 
-// ОБНОВЛЕНИЕ АВАТАРКИ
+// ОБНОВЛЕНИЕ ЛИЧНОЙ АВАТАРКИ
 app.post('/avatar', (req, res) => {
     const { userId, avatarData } = req.body;
     if (!userId || !avatarData) return res.status(400).json({ error: "Данные не полны" });
@@ -122,7 +124,6 @@ app.post('/avatar', (req, res) => {
         res.status(404).json({ error: "Пользователь не найден" });
     }
 });
-
 // ИСТОРИЯ КОНКРЕТНОГО ДИАЛОГА
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
@@ -147,8 +148,8 @@ app.post('/call/init', (req, res) => {
         id: callId,
         from: fromId,
         to: toId,
-        type: callType, // 'audio' или 'video'
-        status: 'ringing', // ringing, answered, ended
+        type: callType,
+        status: 'ringing',
         timestamp: Date.now(),
         offerSdp: sdp,
         answerSdp: null,
@@ -168,7 +169,7 @@ app.post('/call/answer', (req, res) => {
     res.json({ success: true });
 });
 
-//ОБМЕН ICE-КАНДИДАТАМИ ДЛЯ WebRTC
+// ОБМЕН ICE-КАНДИДАТАМИ ДЛЯ WebRTC
 app.post('/call/ice', (req, res) => {
     const { callId, candidate } = req.body;
     const call = activeCalls[callId];
@@ -179,12 +180,11 @@ app.post('/call/ice', (req, res) => {
 });
 // ЗАВЕРШЕНИЕ ИЛИ СБРОС ЗВОНКА В ЛЮБУЮ СЕКУНДУ
 app.post('/call/end', (req, res) => {
-    const { callId, reason, senderName } = req.body;
+    const { callId, reason } = req.body;
     const call = activeCalls[callId];
     if (call) {
         call.status = 'ended';
         
-        // Автоматически логируем системное сообщение в чат в зависимости от причины сброса
         let logText = "📞 Звонок завершен";
         if (reason === 'rejected') logText = "❌ Звонок отклонен";
         if (reason === 'cancelled') logText = "🛑 Звонок отменен";
@@ -206,7 +206,7 @@ app.post('/call/end', (req, res) => {
     res.json({ success: true });
 });
 
-// ПИНГ СЕТИ + ТАЙМАУТ ЗВОНКОВ (15 СЕКУНД ГУДКОВ)
+// ИСПРАВЛЕННЫЙ ПИНГ СЕТИ + ТАЙМАУТ ЗВОНКОВ (15 СЕКУНД ГУДКОВ)
 app.post('/ping', (req, res) => {
     const { userId, name } = req.body;
     const now = Date.now();
@@ -230,7 +230,6 @@ app.post('/ping', (req, res) => {
         if (call.status === 'ringing' && (now - call.timestamp > 15000)) {
             call.status = 'ended';
 
-            // Создаем системное сообщение о пропущенном вызове
             const missedMsg = {
                 id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
                 name: "Система",
@@ -247,16 +246,19 @@ app.post('/ping', (req, res) => {
         }
     });
 
-    // Возвращаем клиенту список юзеров и текущие звонки для его ID
+    // Возвращаем клиенту activeUsers вместо onlineUsers
     const myCalls = Object.values(activeCalls).filter(c => c.from === userId || c.to === userId);
-    res.json({ onlineUsers, activeCalls: myCalls });
+    // Берем самый первый звонок, если он есть в массиве, или null
+    const finalCall = myCalls.length > 0 ? myCalls[0] : null;
+
+    res.json({ onlineUsers: activeUsers, activeCalls: finalCall });
 });
 
 // НОВОЕ СООБЩЕНИЕ В ЧАТ С ФИКСАЦИЕЙ ВРЕМЕНИ
 app.post('/message', (req, res) => {
     const data = req.body;
     if (data && data.senderId && data.receiverId && (data.text || data.file)) {
-        data.timestamp = Date.now(); // Жестко фиксируем время на сервере
+        data.timestamp = Date.now(); 
         messagesHistory.push(data);
         if (messagesHistory.length > 50) messagesHistory.shift();
         saveHistory();
@@ -280,4 +282,4 @@ app.delete('/message/:id', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Сервер мессенджера 5.5 (Звонки и Время) запущен на порту ${PORT}`));
+server.listen(PORT, () => console.log(`Сервер мессенджера запущен на порту ${PORT}`));
