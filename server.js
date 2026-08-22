@@ -134,14 +134,19 @@ io.on('connection', (socket) => {
         if (messagesHistory.length > 100) messagesHistory.shift();
         saveHistory();
 
+        // ⚠️ Отправляем автору
         socket.emit('new_message', msgData);
 
+        // ⚠️ Отправляем получателю, если он онлайн
         if (msgData.receiverId !== 'favorites') {
             const receiverSocketId = onlineUsersMap.get(msgData.receiverId);
             if (receiverSocketId) {
                 io.to(receiverSocketId).emit('new_message', msgData);
             }
         }
+        
+        // ⚠️ Если получатель не в сети, сообщение просто сохранится в истории
+        console.log('Сообщение отправлено:', msgData.senderId, '->', msgData.receiverId);
     });
 
     socket.on('disconnect', () => {
