@@ -2,15 +2,19 @@ const express = require('express');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const compression = require('compression');
+const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(compression());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// Инициализация Socket.io с CORS для мгновенного обмена сообщениями
+const io = new Server(server, {
+    cors: { origin: "*", methods: ["GET", "POST"] }
+});
 
+app.use(express.json({ limit: '50mb' }));
+
+// Настройка CORS для HTTP запросов
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -23,166 +27,121 @@ const HISTORY_FILE = path.join(__dirname, 'chat-history.json');
 const USERS_FILE = path.join(__dirname, 'users.json');
 
 let messagesHistory = [];
-let usersDatabase = {}; // База: { "уникальный_ник": { id, name, password, avatar } }
-let activeUsers = {};   // Текущий онлайн в памяти
+let usersDatabase = {}; 
+let onlineUsersMap = new Map(); // Карта активных пользователей (userId -> socket.id)
 
+// Чтение файлов базы данных с диска
 if (fs.existsSync(HISTORY_FILE)) {
-    try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } 
-    catch (e) { messagesHistory = []; }
+    try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch (e) {}
 }
-
 if (fs.existsSync(USERS_FILE)) {
-    try { usersDatabase = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } 
-    catch (e) { usersDatabase = {}; }
+    try { usersDatabase = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch (e) {}
 }
 
-function saveHistory() {
-    fs.writeFile(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2), (err) => {
-        if (err) console.error("Ошибка записи истории:", err);
-    });
-}
+function saveHistory() { fs.writeFileSync(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2)); }
+function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(usersDatabase, null, 2)); }
 
-function saveUsers() {
-    fs.writeFile(USERS_FILE, JSON.stringify(usersDatabase, null, 2), (err) => {
-        if (err) console.error("Ошибка записи базы пользователей:", err);
-    });
-}
-
-// РЕГИСТРАЦИЯ (Разрешены любые символы, защита от совпадений по регистру)
+// РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
     
     const keyName = username.trim().toLowerCase();
-    if (usersDatabase[keyName]) {
-        return res.status(400).json({ error: "Этот никнейм уже занят другим аккаунтом!" });
-    }
+    if (usersDatabase[keyName]) return res.status(400).json({ error: "Никнейм занят!" });
 
     const userId = 'user_' + Math.random().toString(36).substr(2, 9);
-    usersDatabase[keyName] = {
-        id: userId,
-        name: username.trim(),
-        password: password.trim(),
-        avatar: null
-    };
-
+    usersDatabase[keyName] = { id: userId, name: username.trim(), password: password.trim(), avatar: null };
     saveUsers();
+
+    // Сразу отправляем нового пользователя всем, кто сейчас в сети
+    io.emit('user_registered', { id: userId, name: username.trim(), avatar: null });
     res.json({ success: true, userId, name: username.trim(), avatar: null });
 });
 
-// ВХОД В АККАУНТ
+// ВХОД В СИСТЕМУ
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
-    if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
-
     const keyName = username.trim().toLowerCase();
     const user = usersDatabase[keyName];
 
     if (!user || user.password !== password.trim()) {
         return res.status(400).json({ error: "Неверный никнейм или пароль" });
     }
-
     res.json({ success: true, userId: user.id, name: user.name, avatar: user.avatar });
 });
 
-// ПОИСК ПОЛЬЗОВАТЕЛЯ ПО НИКУ (Ищет среди всех зарегистрированных, даже если они офлайн)
-app.get('/search-user', (req, res) => {
-    const query = req.query.username;
-    if (!query) return res.json([]);
-
-    const searchStr = query.trim().toLowerCase();
-    const results = [];
-
-    Object.keys(usersDatabase).forEach(key => {
-        if (key.includes(searchStr)) {
-            const u = usersDatabase[key];
-            results.push({ id: u.id, name: u.name, avatar: u.avatar });
-        }
-    });
-
-    res.json(results);
+// ПОЛУЧЕНИЕ ВСЕХ ЗАРЕГИСТРИРОВАННЫХ ПОЛЬЗОВАТЕЛЕЙ СИСТЕМЫ
+app.get('/users', (req, res) => {
+    const list = Object.values(usersDatabase).map(u => ({ id: u.id, name: u.name, avatar: u.avatar || null }));
+    res.json(list);
 });
 
-// ОБНОВЛЕНИЕ АВАТАРКИ
-app.post('/avatar', (req, res) => {
-    const { userId, avatarData } = req.body;
-    if (!userId || !avatarData) return res.status(400).json({ error: "Данные не полны" });
-
-    let found = false;
-    Object.keys(usersDatabase).forEach(key => {
-        if (usersDatabase[key].id === userId) {
-            usersDatabase[key].avatar = avatarData;
-            found = true;
-        }
-    });
-
-    if (found) {
-        saveUsers();
-        res.json({ success: true });
-    } else {
-        res.status(404).json({ error: "Пользователь не найден" });
-    }
-});
-
-// ПИНГ СЕТИ
-app.post('/ping', (req, res) => {
-    const { userId, name } = req.body;
-    if (userId && name) {
-        let currentAvatar = null;
-        Object.keys(usersDatabase).forEach(key => {
-            if (usersDatabase[key].id === userId) currentAvatar = usersDatabase[key].avatar;
-        });
-
-        activeUsers[userId] = { name, avatar: currentAvatar, lastSeen: Date.now() };
-    }
-    
-    const now = Date.now();
-    Object.keys(activeUsers).forEach(id => {
-        if (now - activeUsers[id].lastSeen > 8000) delete activeUsers[id];
-    });
-    res.json(activeUsers);
-});
-
-// ИСТОРИЯ КОНКРЕТНОГО ДИАЛОГА
+// ЗАГРУЗКА ИСТОРИИ КОНКРЕТНОГО ДИАЛОГА
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
-    
-    const chatLog = messagesHistory.filter(msg => {
-        if (receiverId === 'favorites') {
-            return msg.receiverId === 'favorites' && msg.senderId === senderId;
-        }
-        return (msg.senderId === senderId && msg.receiverId === receiverId) ||
-               (msg.senderId === receiverId && msg.receiverId === senderId);
+    const log = messagesHistory.filter(msg => {
+        if (receiverId === 'favorites') return msg.receiverId === 'favorites' && msg.senderId === senderId;
+        return (msg.senderId === senderId && msg.receiverId === receiverId) || (msg.senderId === receiverId && msg.receiverId === senderId);
     });
-    
-    res.json(chatLog);
+    res.json(log);
 });
 
-// НОВОЕ СООБЩЕНИЕ
-app.post('/message', (req, res) => {
-    const data = req.body;
-    if (data && data.senderId && data.receiverId && (data.text || data.file)) {
-        messagesHistory.push(data);
-        if (messagesHistory.length > 50) messagesHistory.shift();
-        saveHistory();
-        res.json(data);
-    } else {
-        res.status(400).json({ error: "Неверный формат" });
-    }
+// ОБНОВЛЕНИЕ АВАТАРКИ ПРОФИЛЯ
+app.post('/avatar', (req, res) => {
+    const { userId, avatarData } = req.body;
+    Object.keys(usersDatabase).forEach(key => {
+        if (usersDatabase[key].id === userId) usersDatabase[key].avatar = avatarData;
+    });
+    saveUsers();
+    io.emit('avatar_updated', { userId, avatar: avatarData });
+    res.json({ success: true });
 });
 
-// УДAЛЕНИЕ СООБЩЕНИЯ
+// УДАЛЕНИЕ СООБЩЕНИЯ
 app.delete('/message/:id', (req, res) => {
-    const messageId = req.params.id;
-    const initialLength = messagesHistory.length;
-    messagesHistory = messagesHistory.filter(msg => String(msg.id) !== String(messageId));
-    if (messagesHistory.length !== initialLength) {
+    messagesHistory = messagesHistory.filter(msg => String(msg.id) !== String(req.params.id));
+    saveHistory();
+    io.emit('message_deleted', req.params.id);
+    res.json({ success: true });
+});
+
+// ЛОГИКА МГНОВЕННОГО ОБМЕНА СООБЩЕНИЯМИ (Включая текст, фото, голосовые и кружки)
+io.on('connection', (socket) => {
+    
+    // Объявление пользователя в сети
+    socket.on('iam_online', (userId) => {
+        socket.userId = userId;
+        onlineUsersMap.set(userId, socket.id);
+        io.emit('online_list', Array.from(onlineUsersMap.keys()));
+    });
+
+    // Прием и распределение сообщений (текст / медиафайлы / голосовые / кружки)
+    socket.on('send_message', (msgData) => {
+        msgData.timestamp = Date.now();
+        messagesHistory.push(msgData);
+        if (messagesHistory.length > 100) messagesHistory.shift();
         saveHistory();
-        res.json({ success: true, id: messageId });
-    } else {
-        res.status(404).json({ error: "Не найдено" });
-    }
+
+        // Отправляем автору сообщения для мгновенного рендеринга
+        socket.emit('new_message', msgData);
+
+        // Если это не Избранное, отправляем получателю в режиме реального времени
+        if (msgData.receiverId !== 'favorites') {
+            const receiverSocketId = onlineUsersMap.get(msgData.receiverId);
+            if (receiverSocketId) {
+                io.to(receiverSocketId).emit('new_message', msgData);
+            }
+        }
+    });
+
+    // Отключение от сети (закрытие вкладки браузера)
+    socket.on('disconnect', () => {
+        if (socket.userId) {
+            onlineUsersMap.delete(socket.userId);
+            io.emit('online_list', Array.from(onlineUsersMap.keys()));
+        }
+    });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Сервер мессенджера 4.5 запущен на порту ${PORT}`));
+server.listen(PORT, () => console.log(`Чистый чат-сервер успешно запущен на порту ${PORT}`));
