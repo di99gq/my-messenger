@@ -5,9 +5,11 @@ const path = require('path');
 const { Server } = require('socket.io');
 
 const app = express();
+
+// Создаем HTTP-сервер на базе Express приложения
 const server = http.createServer(app);
 
-// Инициализация Socket.io с CORS для мгновенного обмена сообщениями
+// Инициализируем Socket.io, привязав его строго к HTTP-серверу
 const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] }
 });
@@ -144,4 +146,6 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
+
+// ВАЖНО: Слушаем порт именно через HTTP-сервер, чтобы Socket.io работал корректно!
 server.listen(PORT, () => console.log(`Чистый чат-сервер успешно запущен на порту ${PORT}`));
