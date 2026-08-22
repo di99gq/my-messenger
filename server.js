@@ -117,9 +117,19 @@ app.get('/users', (req, res) => {
     res.json(list);
 });
 
-// ИСТОРИЯ СООБЩЕНИЙ
+// ИСТОРИЯ СООБЩЕНИЙ (исправлено для групп)
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
+    
+    // Если receiverId начинается с group_, значит это группа
+    if (receiverId && receiverId.startsWith('group_')) {
+        // Возвращаем все сообщения, где receiverId === groupId
+        const log = messagesHistory.filter(msg => msg.receiverId === receiverId);
+        res.json(log);
+        return;
+    }
+    
+    // Для личных чатов
     const log = messagesHistory.filter(msg => {
         if (receiverId === 'favorites') return msg.receiverId === 'favorites' && msg.senderId === senderId;
         return (msg.senderId === senderId && msg.receiverId === receiverId) || (msg.senderId === receiverId && msg.receiverId === senderId);
