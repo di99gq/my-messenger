@@ -11,7 +11,7 @@ app.use(compression());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Настройка заголовков CORS для доступа к серверу
+// Настройка CORS для стабильного обмена данными между фронтендом и бэкендом
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -25,16 +25,16 @@ const USERS_FILE = path.join(__dirname, 'users.json');
 
 let messagesHistory = [];
 let usersDatabase = {}; 
-let activeUsers = {};   // Хранилище онлайн-пользователей
-let activeCalls = {};   // Хранилище текущих звонков
+let activeUsers = {};   // Хранилище сессий пользователей, которые онлайн
+let activeCalls = {};   // Активные WebRTC соединения
 
-// Чтение истории сообщений с диска при старте
+// Чтение сохраненных сообщений с диска
 if (fs.existsSync(HISTORY_FILE)) {
     try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } 
     catch (e) { messagesHistory = []; }
 }
 
-// Чтение базы пользователей с диска при старте
+// Чтение базы зарегистрированных аккаунтов с диска
 if (fs.existsSync(USERS_FILE)) {
     try { usersDatabase = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } 
     catch (e) { usersDatabase = {}; }
@@ -42,13 +42,13 @@ if (fs.existsSync(USERS_FILE)) {
 
 function saveHistory() {
     fs.writeFile(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2), (err) => {
-        if (err) console.error("Ошибка записи истории:", err);
+        if (err) console.error("Ошибка сохранения истории:", err);
     });
 }
 
 function saveUsers() {
     fs.writeFile(USERS_FILE, JSON.stringify(usersDatabase, null, 2), (err) => {
-        if (err) console.error("Ошибка записи базы пользователей:", err);
+        if (err) console.error("Ошибка сохранения базы пользователей:", err);
     });
 }
 // РЕГИСТРАЦИЯ АККАУНТА
@@ -88,7 +88,17 @@ app.post('/login', (req, res) => {
     res.json({ success: true, userId: user.id, name: user.name, avatar: user.avatar });
 });
 
-// ТОЧНЫЙ ИСПРАВЛЕННЫЙ ПОИСК ПОЛЬЗОВАТЕЛЯ ПО НИКУ
+// ПРОФЕССИОНАЛЬНОЕ ПОЛУЧЕНИЕ ВСЕХ ЗАРЕГИСТРИРОВАННЫХ ПОЛЬЗОВАТЕЛЕЙ
+app.get('/users', (req, res) => {
+    const list = Object.values(usersDatabase).map(u => ({
+        id: u.id,
+        name: u.name,
+        avatar: u.avatar || null
+    }));
+    res.json(list);
+});
+
+// ЖИВОЙ ПОИСК ПОЛЬЗОВАТЕЛЕЙ ПО НИКУ
 app.get('/search-user', (req, res) => {
     const query = req.query.username;
     if (!query) return res.json([]);
@@ -104,7 +114,7 @@ app.get('/search-user', (req, res) => {
     res.json(results);
 });
 
-// ОБНОВЛЕНИЕ ЛИЧНОЙ АВАТАРКИ
+// ОБНОВЛЕНИЕ ЛИЧНОЙ АВАТАРКИ ПРОФИЛЯ
 app.post('/avatar', (req, res) => {
     const { userId, avatarData } = req.body;
     if (!userId || !avatarData) return res.status(400).json({ error: "Данные не полны" });
@@ -124,7 +134,7 @@ app.post('/avatar', (req, res) => {
         res.status(404).json({ error: "Пользователь не найден" });
     }
 });
-// ИСТОРИЯ КОНКРЕТНОГО ДИАЛОГА
+// ИСТОРИЯ СЕГМЕНТИРОВАННОГО ДИАЛОГА
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
     
@@ -138,7 +148,7 @@ app.get('/history', (req, res) => {
     res.json(chatLog);
 });
 
-// ИНИЦИАЛИЗАЦИЯ ЗВОНКА (Вызывающий начинает гудки)
+// ИНИЦИАЛИЗАЦИЯ WebRTC ЗВОНКА (Исходящие гудки)
 app.post('/call/init', (req, res) => {
     const { fromId, toId, callType, sdp } = req.body;
     if (!fromId || !toId || !callType) return res.status(400).json({ error: "Неполные данные вызова" });
@@ -158,7 +168,7 @@ app.post('/call/init', (req, res) => {
     res.json(activeCalls[callId]);
 });
 
-// ОТВЕТ НА ЗВОНОК (Собеседник поднял трубку)
+// ОТВЕТ НА ВХОДЯЩИЙ ВЫЗОВ (Поднятие трубки)
 app.post('/call/answer', (req, res) => {
     const { callId, sdp } = req.body;
     const call = activeCalls[callId];
@@ -169,7 +179,7 @@ app.post('/call/answer', (req, res) => {
     res.json({ success: true });
 });
 
-// ОБМЕН ICE-КАНДИДАТАМИ ДЛЯ WebRTC
+// ОБМЕН ICE-КАНДИДАТАМИ (Сетевые маршруты)
 app.post('/call/ice', (req, res) => {
     const { callId, candidate } = req.body;
     const call = activeCalls[callId];
@@ -178,7 +188,7 @@ app.post('/call/ice', (req, res) => {
     if (candidate) call.iceCandidates.push(candidate);
     res.json({ success: true });
 });
-// ЗАВЕРШЕНИЕ ИЛИ СБРОС ЗВОНКА В ЛЮБУЮ СЕКУНДУ
+// ЗАВЕРШЕНИЕ ИЛИ ОТКЛОНЕНИЕ ЗВОНКА
 app.post('/call/end', (req, res) => {
     const { callId, reason } = req.body;
     const call = activeCalls[callId];
@@ -206,7 +216,7 @@ app.post('/call/end', (req, res) => {
     res.json({ success: true });
 });
 
-// ИСПРАВЛЕННЫЙ ПИНГ СЕТИ + ТАЙМАУТ ЗВОНКОВ (15 СЕКУНД ГУДКОВ)
+// ПРОФЕССИОНАЛЬНЫЙ ПИНГ: ОТДАЕТ ТОЛЬКО МАССИВ ID ОНЛАЙН-ПОЛЬЗОВАТЕЛЕЙ
 app.post('/ping', (req, res) => {
     const { userId, name } = req.body;
     const now = Date.now();
@@ -219,12 +229,15 @@ app.post('/ping', (req, res) => {
         activeUsers[userId] = { name, avatar: currentAvatar, lastSeen: now };
     }
     
-    // Проверка онлайна (8 секунд отсутствия — офлайн)
+    // Удаляем из онлайна тех, кто пропал более чем на 8 секунд
     Object.keys(activeUsers).forEach(id => {
         if (now - activeUsers[id].lastSeen > 8000) delete activeUsers[id];
     });
 
-    // Проверка таймаута звонков (15 секунд гудков)
+    // Формируем чистый массив ID пользователей, находящихся в сети
+    const onlineIdsArray = Object.keys(activeUsers);
+
+    // Проверка таймаута звонков (15 секунд без ответа — сброс)
     Object.keys(activeCalls).forEach(callId => {
         const call = activeCalls[callId];
         if (call.status === 'ringing' && (now - call.timestamp > 15000)) {
@@ -246,15 +259,13 @@ app.post('/ping', (req, res) => {
         }
     });
 
-    // Возвращаем клиенту activeUsers вместо onlineUsers
     const myCalls = Object.values(activeCalls).filter(c => c.from === userId || c.to === userId);
-    // Берем самый первый звонок, если он есть в массиве, или null
-    const finalCall = myCalls.length > 0 ? myCalls[0] : null;
+    const finalCall = myCalls.length > 0 ? myCalls[0] : null; // Передаем объект звонка в явном виде
 
-    res.json({ onlineUsers: activeUsers, activeCalls: finalCall });
+    res.json({ onlineUsers: onlineIdsArray, activeCalls: finalCall });
 });
 
-// НОВОЕ СООБЩЕНИЕ В ЧАТ С ФИКСАЦИЕЙ ВРЕМЕНИ
+// НОВОЕ СООБЩЕНИЕ В ЧАТ
 app.post('/message', (req, res) => {
     const data = req.body;
     if (data && data.senderId && data.receiverId && (data.text || data.file)) {
@@ -264,11 +275,11 @@ app.post('/message', (req, res) => {
         saveHistory();
         res.json(data);
     } else {
-        res.status(400).json({ error: "Неверный формат" });
+        res.status(400).json({ error: "Неверный формат данных" });
     }
 });
 
-// УДАЛЕНИЕ СООБЩЕНИЯ
+// УДАЛЕНИЕ СООБЩЕНИЯ ИЗ ИСТОРИИ
 app.delete('/message/:id', (req, res) => {
     const messageId = req.params.id;
     const initialLength = messagesHistory.length;
@@ -277,9 +288,9 @@ app.delete('/message/:id', (req, res) => {
         saveHistory();
         res.json({ success: true, id: messageId });
     } else {
-        res.status(404).json({ error: "Не найдено" });
+        res.status(404).json({ error: "Сообщение не найдено" });
     }
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Сервер мессенджера запущен на порту ${PORT}`));
+server.listen(PORT, () => console.log(`Сервер мессенджера успешно запущен на порту ${PORT}`));
