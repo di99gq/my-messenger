@@ -7,10 +7,14 @@ const compression = require('compression');
 const app = express();
 const server = http.createServer(app);
 
+// Включаем сжатие ответов (Gzip)
 app.use(compression());
+
+// Увеличиваем лимиты для тяжелых Base64 файлов (фото, видео, кружки)
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Настройка CORS с поддержкой методов POST и DELETE
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -21,8 +25,7 @@ app.use((req, res, next) => {
 
 const HISTORY_FILE = path.join(__dirname, 'chat-history.json');
 let messagesHistory = [];
-// Хранилище активных онлайн-пользователей
-let activeUsers = {}; 
+let activeUsers = {}; // Список онлайн-пользователей
 
 if (fs.existsSync(HISTORY_FILE)) {
     try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } 
@@ -41,7 +44,7 @@ app.post('/ping', (req, res) => {
     if (userId && name) {
         activeUsers[userId] = { name, lastSeen: Date.now() };
     }
-    // Удаляем тех, кто не пинговал больше 8 секунд
+    // Удаляем пользователей, которые не пинговали сервер дольше 8 секунд
     const now = Date.now();
     Object.keys(activeUsers).forEach(id => {
         if (now - activeUsers[id].lastSeen > 8000) delete activeUsers[id];
@@ -53,7 +56,6 @@ app.post('/ping', (req, res) => {
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
     
-    // Фильтруем сообщения: либо (от А к Б), либо (от Б к А)
     const chatLog = messagesHistory.filter(msg => {
         if (receiverId === 'favorites') {
             return msg.receiverId === 'favorites' && msg.senderId === senderId;
@@ -65,18 +67,20 @@ app.get('/history', (req, res) => {
     res.json(chatLog);
 });
 
+// Сохранение нового сообщения
 app.post('/message', (req, res) => {
-    const data = req.body; // Ожидаем: id, name, senderId, receiverId, text, file, fileType
+    const data = req.body;
     if (data && data.senderId && data.receiverId && (data.text || data.file)) {
         messagesHistory.push(data);
-        if (messagesHistory.length > 100) messagesHistory.shift();
+        if (messagesHistory.length > 50) messagesHistory.shift(); // Ограничение ради экономии памяти Render
         saveHistory();
         res.json(data);
     } else {
-        res.status(400).json({ error: "Неверный формат" });
+        res.status(400).json({ error: "Неверный формат данных" });
     }
 });
 
+// Удаление сообщения
 app.delete('/message/:id', (req, res) => {
     const messageId = req.params.id;
     const initialLength = messagesHistory.length;
@@ -85,7 +89,7 @@ app.delete('/message/:id', (req, res) => {
         saveHistory();
         res.json({ success: true, id: messageId });
     } else {
-        res.status(404).json({ error: "Не найдено" });
+        res.status(404).json({ error: "Сообщение не найдено" });
     }
 });
 
