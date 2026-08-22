@@ -7,17 +7,14 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Подключаем Socket.io с поддержкой CORS
+// Инициализация Socket.io с CORS для мгновенного обмена сообщениями
 const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
+    cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 app.use(express.json({ limit: '50mb' }));
 
-// CORS заголовки для обычных HTTP запросов
+// Настройка CORS для HTTP запросов
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -31,9 +28,9 @@ const USERS_FILE = path.join(__dirname, 'users.json');
 
 let messagesHistory = [];
 let usersDatabase = {}; 
-let onlineUsersMap = new Map(); // Хранилище активных socket.id -> userId
+let onlineUsersMap = new Map(); // Карта активных пользователей (userId -> socket.id)
 
-// Загрузка данных с диска
+// Чтение файлов базы данных с диска
 if (fs.existsSync(HISTORY_FILE)) {
     try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch (e) {}
 }
@@ -44,7 +41,7 @@ if (fs.existsSync(USERS_FILE)) {
 function saveHistory() { fs.writeFileSync(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2)); }
 function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(usersDatabase, null, 2)); }
 
-// HTTP Эндпоинты: Регистрация и Вход
+// РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
@@ -56,11 +53,12 @@ app.post('/register', (req, res) => {
     usersDatabase[keyName] = { id: userId, name: username.trim(), password: password.trim(), avatar: null };
     saveUsers();
 
-    // Оповещаем все подключенные браузеры о новом пользователе
+    // Сразу отправляем нового пользователя всем, кто сейчас в сети
     io.emit('user_registered', { id: userId, name: username.trim(), avatar: null });
     res.json({ success: true, userId, name: username.trim(), avatar: null });
 });
 
+// ВХОД В СИСТЕМУ
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
     const keyName = username.trim().toLowerCase();
@@ -71,12 +69,13 @@ app.post('/login', (req, res) => {
     }
     res.json({ success: true, userId: user.id, name: user.name, avatar: user.avatar });
 });
-
+// ПОЛУЧЕНИЕ ВСЕХ ЗАРЕГИСТРИРОВАННЫХ ПОЛЬЗОВАТЕЛЕЙ СИСТЕМЫ
 app.get('/users', (req, res) => {
     const list = Object.values(usersDatabase).map(u => ({ id: u.id, name: u.name, avatar: u.avatar || null }));
     res.json(list);
 });
 
+// ЗАГРУЗКА ИСТОРИИ КОНКРЕТНОГО ДИАЛОГА
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
     const log = messagesHistory.filter(msg => {
@@ -86,6 +85,7 @@ app.get('/history', (req, res) => {
     res.json(log);
 });
 
+// ОБНОВЛЕНИЕ АВАТАРКИ ПРОФИЛЯ
 app.post('/avatar', (req, res) => {
     const { userId, avatarData } = req.body;
     Object.keys(usersDatabase).forEach(key => {
@@ -96,6 +96,7 @@ app.post('/avatar', (req, res) => {
     res.json({ success: true });
 });
 
+// УДАЛЕНИЕ СООБЩЕНИЯ
 app.delete('/message/:id', (req, res) => {
     messagesHistory = messagesHistory.filter(msg => String(msg.id) !== String(req.params.id));
     saveHistory();
@@ -103,65 +104,36 @@ app.delete('/message/:id', (req, res) => {
     res.json({ success: true });
 });
 
-// Логика Живого Соединения WebSockets
+// ЛОГИКА МГНОВЕННОГО ОБМЕНА СООБЩЕНИЯМИ (Включая текст, фото, голосовые и кружки)
 io.on('connection', (socket) => {
     
-    // Когда пользователь объявляет свой ID при старте страницы
+    // Объявление пользователя в сети
     socket.on('iam_online', (userId) => {
         socket.userId = userId;
         onlineUsersMap.set(userId, socket.id);
-        // Отправляем всем список тех, кто онлайн прямо сейчас
         io.emit('online_list', Array.from(onlineUsersMap.keys()));
     });
 
-    // Обработка отправки сообщения
+    // Прием и распределение сообщений (текст / медиафайлы / голосовые / кружки)
     socket.on('send_message', (msgData) => {
         msgData.timestamp = Date.now();
         messagesHistory.push(msgData);
         if (messagesHistory.length > 100) messagesHistory.shift();
         saveHistory();
 
-        // Отправляем сообщение обратно отправителю
+        // Отправляем автору сообщения для мгновенного рендеринга
         socket.emit('new_message', msgData);
 
-        // Отправляем получателю (если он онлайн)
-        if (msgData.receiverId === 'favorites') return;
-        const receiverSocketId = onlineUsersMap.get(msgData.receiverId);
-        if (receiverSocketId) {
-            io.to(receiverSocketId).emit('new_message', msgData);
+        // Если это не Избранное, отправляем получателю в режиме реального времени
+        if (msgData.receiverId !== 'favorites') {
+            const receiverSocketId = onlineUsersMap.get(msgData.receiverId);
+            if (receiverSocketId) {
+                io.to(receiverSocketId).emit('new_message', msgData);
+            }
         }
     });
 
-    // WebRTC Сигналинг звонков через сокеты (Мгновенно, без задержек)
-    socket.on('call_init', (data) => {
-        const targetSocketId = onlineUsersMap.get(data.toId);
-        if (targetSocketId) {
-            io.to(targetSocketId).emit('incoming_call', {
-                callId: data.callId,
-                fromId: data.fromId,
-                fromName: data.fromName,
-                callType: data.callType,
-                sdp: data.sdp
-            });
-        }
-    });
-
-    socket.on('call_answer', (data) => {
-        const targetSocketId = onlineUsersMap.get(data.toId);
-        if (targetSocketId) io.to(targetSocketId).emit('call_answered', { sdp: data.sdp });
-    });
-
-    socket.on('call_ice', (data) => {
-        const targetSocketId = onlineUsersMap.get(data.toId);
-        if (targetSocketId) io.to(targetSocketId).emit('call_ice_candidate', { candidate: data.candidate });
-    });
-
-    socket.on('call_end', (data) => {
-        const targetSocketId = onlineUsersMap.get(data.toId);
-        if (targetSocketId) io.to(targetSocketId).emit('call_ended');
-    });
-
-    // Отключение пользователя
+    // Отключение от сети (закрытие вкладки браузера)
     socket.on('disconnect', () => {
         if (socket.userId) {
             onlineUsersMap.delete(socket.userId);
@@ -171,4 +143,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Профессиональный Socket-сервер запущен на порту ${PORT}`));
+server.listen(PORT, () => console.log(`Чистый чат-сервер успешно запущен на порту ${PORT}`));
