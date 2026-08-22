@@ -156,24 +156,6 @@ app.post('/create-group', (req, res) => {
     res.json({ success: true, groupId, name: name.trim() });
 });
 
-// РЕДАКТИРОВАНИЕ ГРУППЫ
-app.put('/group/:id', (req, res) => {
-    const { name, description, avatar } = req.body;
-    const group = groupsDatabase[req.params.id];
-    
-    if (!group) {
-        return res.status(404).json({ error: "Группа не найдена" });
-    }
-    
-    if (name) group.name = name.trim();
-    if (description !== undefined) group.description = description;
-    if (avatar !== undefined) group.avatar = avatar;
-    
-    saveGroups();
-    io.emit('group_updated', { id: group.id, name: group.name, description: group.description, avatar: group.avatar });
-    res.json({ success: true });
-});
-
 // ДОБАВЛЕНИЕ УЧАСТНИКА В ГРУППУ
 app.post('/group/:id/members', (req, res) => {
     const { userId } = req.body;
@@ -265,6 +247,24 @@ app.delete('/group/:id', (req, res) => {
     res.json({ success: true });
 });
 
+// РЕДАКТИРОВАНИЕ ГРУППЫ
+app.put('/group/:id', (req, res) => {
+    const { name, description, avatar } = req.body;
+    const group = groupsDatabase[req.params.id];
+    
+    if (!group) {
+        return res.status(404).json({ error: "Группа не найдена" });
+    }
+    
+    if (name) group.name = name.trim();
+    if (description !== undefined) group.description = description;
+    if (avatar !== undefined) group.avatar = avatar;
+    
+    saveGroups();
+    io.emit('group_updated', { id: group.id, name: group.name, description: group.description, avatar: group.avatar });
+    res.json({ success: true });
+});
+
 // ОБНОВЛЕНИЕ АВАТАРКИ
 app.post('/avatar', (req, res) => {
     const { userId, avatarData } = req.body;
@@ -302,7 +302,7 @@ app.put('/message/:id', (req, res) => {
     res.json({ success: true });
 });
 
-// SOCKET.IO
+// SOCKET.IO — ИСПРАВЛЕННАЯ ОТПРАВКА СООБЩЕНИЙ
 io.on('connection', (socket) => {
     console.log('Подключение:', socket.id);
     
@@ -323,14 +323,31 @@ io.on('connection', (socket) => {
         if (messagesHistory.length > 100) messagesHistory.shift();
         saveHistory();
 
+        // Всегда отправляем автору
         socket.emit('new_message', msgData);
 
-        if (msgData.receiverId !== 'favorites') {
+        // Если это группа — отправляем всем участникам группы
+        if (msgData.receiverId.startsWith('group_')) {
+            const group = groupsDatabase[msgData.receiverId];
+            if (group) {
+                group.members.forEach(memberId => {
+                    if (memberId !== msgData.senderId) {
+                        const memberSocketId = onlineUsersMap.get(memberId);
+                        if (memberSocketId) {
+                            io.to(memberSocketId).emit('new_message', msgData);
+                        }
+                    }
+                });
+            }
+        } else if (msgData.receiverId !== 'favorites') {
+            // Если личное сообщение — отправляем получателю
             const receiverSocketId = onlineUsersMap.get(msgData.receiverId);
             if (receiverSocketId) {
                 io.to(receiverSocketId).emit('new_message', msgData);
             }
         }
+        
+        console.log('Сообщение отправлено:', msgData.senderId, '->', msgData.receiverId);
     });
 
     socket.on('disconnect', () => {
