@@ -2,16 +2,22 @@ const express = require('express');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const compression = require('compression');
+const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(compression());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// Подключаем Socket.io с поддержкой CORS
+const io = new Server(server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
 
-// Настройка CORS для стабильного обмена данными между фронтендом и бэкендом
+app.use(express.json({ limit: '50mb' }));
+
+// CORS заголовки для обычных HTTP запросов
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -25,272 +31,144 @@ const USERS_FILE = path.join(__dirname, 'users.json');
 
 let messagesHistory = [];
 let usersDatabase = {}; 
-let activeUsers = {};   // Хранилище сессий пользователей, которые онлайн
-let activeCalls = {};   // Активные WebRTC соединения
+let onlineUsersMap = new Map(); // Хранилище активных socket.id -> userId
 
-// Чтение сохраненных сообщений с диска
+// Загрузка данных с диска
 if (fs.existsSync(HISTORY_FILE)) {
-    try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } 
-    catch (e) { messagesHistory = []; }
+    try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch (e) {}
 }
-
-// Чтение базы зарегистрированных аккаунтов с диска
 if (fs.existsSync(USERS_FILE)) {
-    try { usersDatabase = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } 
-    catch (e) { usersDatabase = {}; }
+    try { usersDatabase = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch (e) {}
 }
 
-function saveHistory() {
-    fs.writeFile(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2), (err) => {
-        if (err) console.error("Ошибка сохранения истории:", err);
-    });
-}
+function saveHistory() { fs.writeFileSync(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2)); }
+function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(usersDatabase, null, 2)); }
 
-function saveUsers() {
-    fs.writeFile(USERS_FILE, JSON.stringify(usersDatabase, null, 2), (err) => {
-        if (err) console.error("Ошибка сохранения базы пользователей:", err);
-    });
-}
-// РЕГИСТРАЦИЯ АККАУНТА
+// HTTP Эндпоинты: Регистрация и Вход
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
     
     const keyName = username.trim().toLowerCase();
-    if (usersDatabase[keyName]) {
-        return res.status(400).json({ error: "Этот никнейм уже занят другим аккаунтом!" });
-    }
+    if (usersDatabase[keyName]) return res.status(400).json({ error: "Никнейм занят!" });
 
     const userId = 'user_' + Math.random().toString(36).substr(2, 9);
-    usersDatabase[keyName] = {
-        id: userId,
-        name: username.trim(),
-        password: password.trim(),
-        avatar: null
-    };
-
+    usersDatabase[keyName] = { id: userId, name: username.trim(), password: password.trim(), avatar: null };
     saveUsers();
+
+    // Оповещаем все подключенные браузеры о новом пользователе
+    io.emit('user_registered', { id: userId, name: username.trim(), avatar: null });
     res.json({ success: true, userId, name: username.trim(), avatar: null });
 });
 
-// ВХОД В АККАУНТ
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
-    if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
-
     const keyName = username.trim().toLowerCase();
     const user = usersDatabase[keyName];
 
     if (!user || user.password !== password.trim()) {
         return res.status(400).json({ error: "Неверный никнейм или пароль" });
     }
-
     res.json({ success: true, userId: user.id, name: user.name, avatar: user.avatar });
 });
 
-// ПРОФЕССИОНАЛЬНОЕ ПОЛУЧЕНИЕ ВСЕХ ЗАРЕГИСТРИРОВАННЫХ ПОЛЬЗОВАТЕЛЕЙ
 app.get('/users', (req, res) => {
-    const list = Object.values(usersDatabase).map(u => ({
-        id: u.id,
-        name: u.name,
-        avatar: u.avatar || null
-    }));
+    const list = Object.values(usersDatabase).map(u => ({ id: u.id, name: u.name, avatar: u.avatar || null }));
     res.json(list);
 });
 
-// ЖИВОЙ ПОИСК ПОЛЬЗОВАТЕЛЕЙ ПО НИКУ
-app.get('/search-user', (req, res) => {
-    const query = req.query.username;
-    if (!query) return res.json([]);
-
-    const searchStr = query.trim().toLowerCase();
-    const results = [];
-
-    Object.values(usersDatabase).forEach(u => {
-        if (u.name.toLowerCase().includes(searchStr)) {
-            results.push({ id: u.id, name: u.name, avatar: u.avatar });
-        }
-    });
-    res.json(results);
-});
-
-// ОБНОВЛЕНИЕ ЛИЧНОЙ АВАТАРКИ ПРОФИЛЯ
-app.post('/avatar', (req, res) => {
-    const { userId, avatarData } = req.body;
-    if (!userId || !avatarData) return res.status(400).json({ error: "Данные не полны" });
-
-    let found = false;
-    Object.keys(usersDatabase).forEach(key => {
-        if (usersDatabase[key].id === userId) {
-            usersDatabase[key].avatar = avatarData;
-            found = true;
-        }
-    });
-
-    if (found) {
-        saveUsers();
-        res.json({ success: true });
-    } else {
-        res.status(404).json({ error: "Пользователь не найден" });
-    }
-});
-// ИСТОРИЯ СЕГМЕНТИРОВАННОГО ДИАЛОГА
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
-    
-    const chatLog = messagesHistory.filter(msg => {
-        if (receiverId === 'favorites') {
-            return msg.receiverId === 'favorites' && msg.senderId === senderId;
-        }
-        return (msg.senderId === senderId && msg.receiverId === receiverId) ||
-               (msg.senderId === receiverId && msg.receiverId === senderId);
+    const log = messagesHistory.filter(msg => {
+        if (receiverId === 'favorites') return msg.receiverId === 'favorites' && msg.senderId === senderId;
+        return (msg.senderId === senderId && msg.receiverId === receiverId) || (msg.senderId === receiverId && msg.receiverId === senderId);
     });
-    res.json(chatLog);
+    res.json(log);
 });
 
-// ИНИЦИАЛИЗАЦИЯ WebRTC ЗВОНКА (Исходящие гудки)
-app.post('/call/init', (req, res) => {
-    const { fromId, toId, callType, sdp } = req.body;
-    if (!fromId || !toId || !callType) return res.status(400).json({ error: "Неполные данные вызова" });
-
-    const callId = 'call_' + Date.now();
-    activeCalls[callId] = {
-        id: callId,
-        from: fromId,
-        to: toId,
-        type: callType,
-        status: 'ringing',
-        timestamp: Date.now(),
-        offerSdp: sdp,
-        answerSdp: null,
-        iceCandidates: []
-    };
-    res.json(activeCalls[callId]);
-});
-
-// ОТВЕТ НА ВХОДЯЩИЙ ВЫЗОВ (Поднятие трубки)
-app.post('/call/answer', (req, res) => {
-    const { callId, sdp } = req.body;
-    const call = activeCalls[callId];
-    if (!call) return res.status(404).json({ error: "Звонок не найден" });
-
-    call.status = 'answered';
-    call.answerSdp = sdp;
+app.post('/avatar', (req, res) => {
+    const { userId, avatarData } = req.body;
+    Object.keys(usersDatabase).forEach(key => {
+        if (usersDatabase[key].id === userId) usersDatabase[key].avatar = avatarData;
+    });
+    saveUsers();
+    io.emit('avatar_updated', { userId, avatar: avatarData });
     res.json({ success: true });
 });
 
-// ОБМЕН ICE-КАНДИДАТАМИ (Сетевые маршруты)
-app.post('/call/ice', (req, res) => {
-    const { callId, candidate } = req.body;
-    const call = activeCalls[callId];
-    if (!call) return res.status(404).json({ error: "Звонок не найден" });
-
-    if (candidate) call.iceCandidates.push(candidate);
-    res.json({ success: true });
-});
-// ЗАВЕРШЕНИЕ ИЛИ ОТКЛОНЕНИЕ ЗВОНКА
-app.post('/call/end', (req, res) => {
-    const { callId, reason } = req.body;
-    const call = activeCalls[callId];
-    if (call) {
-        call.status = 'ended';
-        
-        let logText = "📞 Звонок завершен";
-        if (reason === 'rejected') logText = "❌ Звонок отклонен";
-        if (reason === 'cancelled') logText = "🛑 Звонок отменен";
-
-        const systemMsg = {
-            id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
-            name: "Система",
-            senderId: call.from,
-            receiverId: call.to,
-            text: `${logText} (${call.type === 'video' ? 'Видео' : 'Аудио'})`,
-            timestamp: Date.now()
-        };
-        messagesHistory.push(systemMsg);
-        if (messagesHistory.length > 50) messagesHistory.shift();
-        saveHistory();
-        
-        delete activeCalls[callId];
-    }
-    res.json({ success: true });
-});
-
-// ПРОФЕССИОНАЛЬНЫЙ ПИНГ: ОТДАЕТ ТОЛЬКО МАССИВ ID ОНЛАЙН-ПОЛЬЗОВАТЕЛЕЙ
-app.post('/ping', (req, res) => {
-    const { userId, name } = req.body;
-    const now = Date.now();
-
-    if (userId && name) {
-        let currentAvatar = null;
-        Object.keys(usersDatabase).forEach(key => {
-            if (usersDatabase[key].id === userId) currentAvatar = usersDatabase[key].avatar;
-        });
-        activeUsers[userId] = { name, avatar: currentAvatar, lastSeen: now };
-    }
-    
-    // Удаляем из онлайна тех, кто пропал более чем на 8 секунд
-    Object.keys(activeUsers).forEach(id => {
-        if (now - activeUsers[id].lastSeen > 8000) delete activeUsers[id];
-    });
-
-    // Формируем чистый массив ID пользователей, находящихся в сети
-    const onlineIdsArray = Object.keys(activeUsers);
-
-    // Проверка таймаута звонков (15 секунд без ответа — сброс)
-    Object.keys(activeCalls).forEach(callId => {
-        const call = activeCalls[callId];
-        if (call.status === 'ringing' && (now - call.timestamp > 15000)) {
-            call.status = 'ended';
-
-            const missedMsg = {
-                id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
-                name: "Система",
-                senderId: call.from,
-                receiverId: call.to,
-                text: `❌ Пропущенный вызов (${call.type === 'video' ? 'Видео' : 'Аудио'})`,
-                timestamp: now
-            };
-            messagesHistory.push(missedMsg);
-            if (messagesHistory.length > 50) messagesHistory.shift();
-            saveHistory();
-
-            delete activeCalls[callId];
-        }
-    });
-
-    const myCalls = Object.values(activeCalls).filter(c => c.from === userId || c.to === userId);
-    const finalCall = myCalls.length > 0 ? myCalls[0] : null; // Передаем объект звонка в явном виде
-
-    res.json({ onlineUsers: onlineIdsArray, activeCalls: finalCall });
-});
-
-// НОВОЕ СООБЩЕНИЕ В ЧАТ
-app.post('/message', (req, res) => {
-    const data = req.body;
-    if (data && data.senderId && data.receiverId && (data.text || data.file)) {
-        data.timestamp = Date.now(); 
-        messagesHistory.push(data);
-        if (messagesHistory.length > 50) messagesHistory.shift();
-        saveHistory();
-        res.json(data);
-    } else {
-        res.status(400).json({ error: "Неверный формат данных" });
-    }
-});
-
-// УДАЛЕНИЕ СООБЩЕНИЯ ИЗ ИСТОРИИ
 app.delete('/message/:id', (req, res) => {
-    const messageId = req.params.id;
-    const initialLength = messagesHistory.length;
-    messagesHistory = messagesHistory.filter(msg => String(msg.id) !== String(messageId));
-    if (messagesHistory.length !== initialLength) {
+    messagesHistory = messagesHistory.filter(msg => String(msg.id) !== String(req.params.id));
+    saveHistory();
+    io.emit('message_deleted', req.params.id);
+    res.json({ success: true });
+});
+
+// Логика Живого Соединения WebSockets
+io.on('connection', (socket) => {
+    
+    // Когда пользователь объявляет свой ID при старте страницы
+    socket.on('iam_online', (userId) => {
+        socket.userId = userId;
+        onlineUsersMap.set(userId, socket.id);
+        // Отправляем всем список тех, кто онлайн прямо сейчас
+        io.emit('online_list', Array.from(onlineUsersMap.keys()));
+    });
+
+    // Обработка отправки сообщения
+    socket.on('send_message', (msgData) => {
+        msgData.timestamp = Date.now();
+        messagesHistory.push(msgData);
+        if (messagesHistory.length > 100) messagesHistory.shift();
         saveHistory();
-        res.json({ success: true, id: messageId });
-    } else {
-        res.status(404).json({ error: "Сообщение не найдено" });
-    }
+
+        // Отправляем сообщение обратно отправителю
+        socket.emit('new_message', msgData);
+
+        // Отправляем получателю (если он онлайн)
+        if (msgData.receiverId === 'favorites') return;
+        const receiverSocketId = onlineUsersMap.get(msgData.receiverId);
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('new_message', msgData);
+        }
+    });
+
+    // WebRTC Сигналинг звонков через сокеты (Мгновенно, без задержек)
+    socket.on('call_init', (data) => {
+        const targetSocketId = onlineUsersMap.get(data.toId);
+        if (targetSocketId) {
+            io.to(targetSocketId).emit('incoming_call', {
+                callId: data.callId,
+                fromId: data.fromId,
+                fromName: data.fromName,
+                callType: data.callType,
+                sdp: data.sdp
+            });
+        }
+    });
+
+    socket.on('call_answer', (data) => {
+        const targetSocketId = onlineUsersMap.get(data.toId);
+        if (targetSocketId) io.to(targetSocketId).emit('call_answered', { sdp: data.sdp });
+    });
+
+    socket.on('call_ice', (data) => {
+        const targetSocketId = onlineUsersMap.get(data.toId);
+        if (targetSocketId) io.to(targetSocketId).emit('call_ice_candidate', { candidate: data.candidate });
+    });
+
+    socket.on('call_end', (data) => {
+        const targetSocketId = onlineUsersMap.get(data.toId);
+        if (targetSocketId) io.to(targetSocketId).emit('call_ended');
+    });
+
+    // Отключение пользователя
+    socket.on('disconnect', () => {
+        if (socket.userId) {
+            onlineUsersMap.delete(socket.userId);
+            io.emit('online_list', Array.from(onlineUsersMap.keys()));
+        }
+    });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Сервер мессенджера успешно запущен на порту ${PORT}`));
+server.listen(PORT, () => console.log(`Профессиональный Socket-сервер запущен на порту ${PORT}`));
