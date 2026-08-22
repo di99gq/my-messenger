@@ -302,7 +302,7 @@ app.put('/message/:id', (req, res) => {
     res.json({ success: true });
 });
 
-// SOCKET.IO — ИСПРАВЛЕННАЯ ОТПРАВКА СООБЩЕНИЙ
+// SOCKET.IO
 io.on('connection', (socket) => {
     console.log('Подключение:', socket.id);
     
@@ -323,7 +323,6 @@ io.on('connection', (socket) => {
         if (messagesHistory.length > 100) messagesHistory.shift();
         saveHistory();
 
-        // Всегда отправляем автору
         socket.emit('new_message', msgData);
 
         // Если это группа — отправляем всем участникам группы
