@@ -50,7 +50,7 @@ app.post('/register', (req, res) => {
     
     const keyName = username.trim().toLowerCase();
     
-    // ⚠️ Проверка: ник уже занят?
+    // Проверка: ник уже занят?
     if (usersDatabase[keyName]) {
         return res.status(400).json({ error: "Этот никнейм уже занят! Выбери другой." });
     }
@@ -114,6 +114,22 @@ app.delete('/message/:id', (req, res) => {
     messagesHistory = messagesHistory.filter(msg => String(msg.id) !== String(req.params.id));
     saveHistory();
     io.emit('message_deleted', req.params.id);
+    res.json({ success: true });
+});
+
+// РЕДАКТИРОВАНИЕ СООБЩЕНИЯ
+app.put('/message/:id', (req, res) => {
+    const { newText } = req.body;
+    const msg = messagesHistory.find(m => String(m.id) === String(req.params.id));
+    
+    if (!msg) {
+        return res.status(404).json({ error: "Сообщение не найдено" });
+    }
+    
+    msg.text = newText;
+    msg.edited = true;
+    saveHistory();
+    io.emit('message_edited', { id: msg.id, newText: newText, edited: true });
     res.json({ success: true });
 });
 
