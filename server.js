@@ -43,13 +43,17 @@ function saveUsers() {
     try { fs.writeFileSync(USERS_FILE, JSON.stringify(usersDatabase, null, 2)); } catch (e) {}
 }
 
-// РЕГИСТРАЦИЯ
+// РЕГИСТРАЦИЯ (с проверкой уникальности)
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
     
     const keyName = username.trim().toLowerCase();
-    if (usersDatabase[keyName]) return res.status(400).json({ error: "Никнейм занят!" });
+    
+    // ⚠️ Проверка: ник уже занят?
+    if (usersDatabase[keyName]) {
+        return res.status(400).json({ error: "Этот никнейм уже занят! Выбери другой." });
+    }
 
     const userId = 'user_' + Math.random().toString(36).substr(2, 9);
     usersDatabase[keyName] = { 
@@ -134,10 +138,8 @@ io.on('connection', (socket) => {
         if (messagesHistory.length > 100) messagesHistory.shift();
         saveHistory();
 
-        // ⚠️ Отправляем автору
         socket.emit('new_message', msgData);
 
-        // ⚠️ Отправляем получателю, если он онлайн
         if (msgData.receiverId !== 'favorites') {
             const receiverSocketId = onlineUsersMap.get(msgData.receiverId);
             if (receiverSocketId) {
@@ -145,7 +147,6 @@ io.on('connection', (socket) => {
             }
         }
         
-        // ⚠️ Если получатель не в сети, сообщение просто сохранится в истории
         console.log('Сообщение отправлено:', msgData.senderId, '->', msgData.receiverId);
     });
 
