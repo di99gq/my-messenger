@@ -302,7 +302,7 @@ app.put('/message/:id', (req, res) => {
     res.json({ success: true });
 });
 
-// SOCKET.IO
+// SOCKET.IO — ГАРАНТИРОВАННАЯ РАССЫЛКА
 io.on('connection', (socket) => {
     console.log('Подключение:', socket.id);
     
@@ -323,9 +323,10 @@ io.on('connection', (socket) => {
         if (messagesHistory.length > 100) messagesHistory.shift();
         saveHistory();
 
+        // Всегда отправляем автору
         socket.emit('new_message', msgData);
 
-        // Если это группа — отправляем всем участникам группы
+        // Если это группа — отправляем ВСЕМ участникам группы (кроме автора)
         if (msgData.receiverId.startsWith('group_')) {
             const group = groupsDatabase[msgData.receiverId];
             if (group) {
