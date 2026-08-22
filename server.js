@@ -12,10 +12,10 @@ const io = new Server(server, {
 
 app.use(express.json({ limit: '50mb' }));
 
-// CORS
+// CORS (добавлен PUT)
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"); // ← ДОБАВЛЕН PUT
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
@@ -23,9 +23,11 @@ app.use((req, res, next) => {
 
 const HISTORY_FILE = path.join(__dirname, 'chat-history.json');
 const USERS_FILE = path.join(__dirname, 'users.json');
+const GROUPS_FILE = path.join(__dirname, 'groups.json');
 
 let messagesHistory = [];
 let usersDatabase = {}; 
+let groupsDatabase = {}; 
 let onlineUsersMap = new Map();
 
 // Чтение файлов
@@ -35,6 +37,9 @@ if (fs.existsSync(HISTORY_FILE)) {
 if (fs.existsSync(USERS_FILE)) {
     try { usersDatabase = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch (e) {}
 }
+if (fs.existsSync(GROUPS_FILE)) {
+    try { groupsDatabase = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')); } catch (e) {}
+}
 
 function saveHistory() { 
     try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(messagesHistory, null, 2)); } catch (e) {}
@@ -42,15 +47,17 @@ function saveHistory() {
 function saveUsers() { 
     try { fs.writeFileSync(USERS_FILE, JSON.stringify(usersDatabase, null, 2)); } catch (e) {}
 }
+function saveGroups() { 
+    try { fs.writeFileSync(GROUPS_FILE, JSON.stringify(groupsDatabase, null, 2)); } catch (e) {}
+}
 
-// РЕГИСТРАЦИЯ (с проверкой уникальности)
+// РЕГИСТРАЦИЯ
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
     
     const keyName = username.trim().toLowerCase();
     
-    // Проверка: ник уже занят?
     if (usersDatabase[keyName]) {
         return res.status(400).json({ error: "Этот никнейм уже занят! Выбери другой." });
     }
@@ -94,6 +101,98 @@ app.get('/history', (req, res) => {
         return (msg.senderId === senderId && msg.receiverId === receiverId) || (msg.senderId === receiverId && msg.receiverId === senderId);
     });
     res.json(log);
+});
+
+// ПОЛУЧЕНИЕ ВСЕХ ГРУПП
+app.get('/groups', (req, res) => {
+    const list = Object.values(groupsDatabase).map(g => ({ 
+        id: g.id, 
+        name: g.name, 
+        avatar: g.avatar || null, 
+        description: g.description || '',
+        members: g.members || [],
+        adminId: g.adminId
+    }));
+    res.json(list);
+});
+
+// СОЗДАНИЕ ГРУППЫ
+app.post('/create-group', (req, res) => {
+    const { name, description, avatar, adminId, members } = req.body;
+    if (!name || !adminId) return res.status(400).json({ error: "Заполните название группы" });
+    
+    const groupId = 'group_' + Math.random().toString(36).substr(2, 9);
+    groupsDatabase[groupId] = {
+        id: groupId,
+        name: name.trim(),
+        description: description || '',
+        avatar: avatar || null,
+        adminId: adminId,
+        members: Array.isArray(members) ? [...new Set([adminId, ...members])] : [adminId]
+    };
+    saveGroups();
+
+    io.emit('group_created', { id: groupId, name: name.trim(), description: description || '', avatar: avatar || null, members: groupsDatabase[groupId].members });
+    res.json({ success: true, groupId, name: name.trim() });
+});
+
+// РЕДАКТИРОВАНИЕ ГРУППЫ
+app.put('/group/:id', (req, res) => {
+    const { name, description, avatar } = req.body;
+    const group = groupsDatabase[req.params.id];
+    
+    if (!group) {
+        return res.status(404).json({ error: "Группа не найдена" });
+    }
+    
+    if (name) group.name = name.trim();
+    if (description !== undefined) group.description = description;
+    if (avatar !== undefined) group.avatar = avatar;
+    
+    saveGroups();
+    io.emit('group_updated', { id: group.id, name: group.name, description: group.description, avatar: group.avatar });
+    res.json({ success: true });
+});
+
+// ДОБАВЛЕНИЕ УЧАСТНИКА В ГРУППУ
+app.post('/group/:id/members', (req, res) => {
+    const { userId } = req.body;
+    const group = groupsDatabase[req.params.id];
+    
+    if (!group) {
+        return res.status(404).json({ error: "Группа не найдена" });
+    }
+    
+    if (!group.members.includes(userId)) {
+        group.members.push(userId);
+        saveGroups();
+        io.emit('group_member_added', { groupId: group.id, userId: userId, members: group.members });
+    }
+    
+    res.json({ success: true, members: group.members });
+});
+
+// УДАЛЕНИЕ УЧАСТНИКА ИЗ ГРУППЫ
+app.delete('/group/:id/members/:userId', (req, res) => {
+    const group = groupsDatabase[req.params.id];
+    const userId = req.params.userId;
+    
+    if (!group) {
+        return res.status(404).json({ error: "Группа не найдена" });
+    }
+    
+    group.members = group.members.filter(u => u !== userId);
+    saveGroups();
+    io.emit('group_member_removed', { groupId: group.id, userId: userId, members: group.members });
+    res.json({ success: true, members: group.members });
+});
+
+// УДАЛЕНИЕ ГРУППЫ
+app.delete('/group/:id', (req, res) => {
+    delete groupsDatabase[req.params.id];
+    saveGroups();
+    io.emit('group_deleted', req.params.id);
+    res.json({ success: true });
 });
 
 // ОБНОВЛЕНИЕ АВАТАРКИ
@@ -162,8 +261,6 @@ io.on('connection', (socket) => {
                 io.to(receiverSocketId).emit('new_message', msgData);
             }
         }
-        
-        console.log('Сообщение отправлено:', msgData.senderId, '->', msgData.receiverId);
     });
 
     socket.on('disconnect', () => {
