@@ -12,7 +12,7 @@ const io = new Server(server, {
 
 app.use(express.json({ limit: '50mb' }));
 
-// CORS (добавлен PUT)
+// CORS
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -132,6 +132,26 @@ app.post('/create-group', (req, res) => {
     };
     saveGroups();
 
+    // Системное сообщение о создании группы
+    const systemMsg = {
+        id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
+        senderId: 'system',
+        receiverId: groupId,
+        text: `Группа "${name.trim()}" создана`,
+        timestamp: Date.now(),
+        system: true
+    };
+    messagesHistory.push(systemMsg);
+    saveHistory();
+
+    // Отправляем всем участникам
+    groupsDatabase[groupId].members.forEach(userId => {
+        const userSocketId = onlineUsersMap.get(userId);
+        if (userSocketId) {
+            io.to(userSocketId).emit('new_message', systemMsg);
+        }
+    });
+
     io.emit('group_created', { id: groupId, name: name.trim(), description: description || '', avatar: avatar || null, members: groupsDatabase[groupId].members });
     res.json({ success: true, groupId, name: name.trim() });
 });
@@ -166,6 +186,34 @@ app.post('/group/:id/members', (req, res) => {
     if (!group.members.includes(userId)) {
         group.members.push(userId);
         saveGroups();
+
+        // Системное сообщение о добавлении участника
+        const user = usersDatabase[Object.keys(usersDatabase).find(key => usersDatabase[key].id === userId)];
+        const systemMsg = {
+            id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
+            senderId: 'system',
+            receiverId: group.id,
+            text: `${user ? user.name : 'Пользователь'} добавлен в группу`,
+            timestamp: Date.now(),
+            system: true
+        };
+        messagesHistory.push(systemMsg);
+        saveHistory();
+
+        // Отправляем всем участникам группы
+        group.members.forEach(memberId => {
+            const memberSocketId = onlineUsersMap.get(memberId);
+            if (memberSocketId) {
+                io.to(memberSocketId).emit('new_message', systemMsg);
+            }
+        });
+
+        // Отправляем новому участнику группу
+        const newMemberSocketId = onlineUsersMap.get(userId);
+        if (newMemberSocketId) {
+            io.to(newMemberSocketId).emit('group_added_to_chat', { id: group.id, name: group.name, avatar: group.avatar });
+        }
+
         io.emit('group_member_added', { groupId: group.id, userId: userId, members: group.members });
     }
     
@@ -183,6 +231,28 @@ app.delete('/group/:id/members/:userId', (req, res) => {
     
     group.members = group.members.filter(u => u !== userId);
     saveGroups();
+
+    // Системное сообщение об удалении участника
+    const user = usersDatabase[Object.keys(usersDatabase).find(key => usersDatabase[key].id === userId)];
+    const systemMsg = {
+        id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
+        senderId: 'system',
+        receiverId: group.id,
+        text: `${user ? user.name : 'Пользователь'} удалён из группы`,
+        timestamp: Date.now(),
+        system: true
+    };
+    messagesHistory.push(systemMsg);
+    saveHistory();
+
+    // Отправляем всем участникам
+    group.members.forEach(memberId => {
+        const memberSocketId = onlineUsersMap.get(memberId);
+        if (memberSocketId) {
+            io.to(memberSocketId).emit('new_message', systemMsg);
+        }
+    });
+
     io.emit('group_member_removed', { groupId: group.id, userId: userId, members: group.members });
     res.json({ success: true, members: group.members });
 });
