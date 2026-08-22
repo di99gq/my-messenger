@@ -23,8 +23,9 @@ const HISTORY_FILE = path.join(__dirname, 'chat-history.json');
 const USERS_FILE = path.join(__dirname, 'users.json');
 
 let messagesHistory = [];
-let usersDatabase = {}; // База: { "уникальный_ник": { id, name, password, avatar } }
-let activeUsers = {};   // Текущий онлайн в памяти
+let usersDatabase = {}; 
+let activeUsers = {};   // Онлайн-пользователи
+let activeCalls = {};   // Текущие звонки в процессе { callId: { from, to, type, status, timestamp, sdp, ice } }
 
 if (fs.existsSync(HISTORY_FILE)) {
     try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } 
@@ -48,7 +49,7 @@ function saveUsers() {
     });
 }
 
-// РЕГИСТРАЦИЯ (Разрешены любые символы, защита от совпадений по регистру)
+// РЕГИСТРАЦИЯ
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
@@ -84,8 +85,7 @@ app.post('/login', (req, res) => {
 
     res.json({ success: true, userId: user.id, name: user.name, avatar: user.avatar });
 });
-
-// ПОИСК ПОЛЬЗОВАТЕЛЯ ПО НИКУ (Ищет среди всех зарегистрированных, даже если они офлайн)
+// ПОИСК ПОЛЬЗОВАТЕЛЯ ПО НИКУ
 app.get('/search-user', (req, res) => {
     const query = req.query.username;
     if (!query) return res.json([]);
@@ -99,7 +99,6 @@ app.get('/search-user', (req, res) => {
             results.push({ id: u.id, name: u.name, avatar: u.avatar });
         }
     });
-
     res.json(results);
 });
 
@@ -124,25 +123,6 @@ app.post('/avatar', (req, res) => {
     }
 });
 
-// ПИНГ СЕТИ
-app.post('/ping', (req, res) => {
-    const { userId, name } = req.body;
-    if (userId && name) {
-        let currentAvatar = null;
-        Object.keys(usersDatabase).forEach(key => {
-            if (usersDatabase[key].id === userId) currentAvatar = usersDatabase[key].avatar;
-        });
-
-        activeUsers[userId] = { name, avatar: currentAvatar, lastSeen: Date.now() };
-    }
-    
-    const now = Date.now();
-    Object.keys(activeUsers).forEach(id => {
-        if (now - activeUsers[id].lastSeen > 8000) delete activeUsers[id];
-    });
-    res.json(activeUsers);
-});
-
 // ИСТОРИЯ КОНКРЕТНОГО ДИАЛОГА
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
@@ -154,14 +134,129 @@ app.get('/history', (req, res) => {
         return (msg.senderId === senderId && msg.receiverId === receiverId) ||
                (msg.senderId === receiverId && msg.receiverId === senderId);
     });
-    
     res.json(chatLog);
 });
 
-// НОВОЕ СООБЩЕНИЕ
+// ИНИЦИАЛИЗАЦИЯ ЗВОНКА (Вызывающий начинает гудки)
+app.post('/call/init', (req, res) => {
+    const { fromId, toId, callType, sdp } = req.body;
+    if (!fromId || !toId || !callType) return res.status(400).json({ error: "Неполные данные вызова" });
+
+    const callId = 'call_' + Date.now();
+    activeCalls[callId] = {
+        id: callId,
+        from: fromId,
+        to: toId,
+        type: callType, // 'audio' или 'video'
+        status: 'ringing', // ringing, answered, ended
+        timestamp: Date.now(),
+        offerSdp: sdp,
+        answerSdp: null,
+        iceCandidates: []
+    };
+    res.json(activeCalls[callId]);
+});
+
+// ОТВЕТ НА ЗВОНОК (Собеседник поднял трубку)
+app.post('/call/answer', (req, res) => {
+    const { callId, sdp } = req.body;
+    const call = activeCalls[callId];
+    if (!call) return res.status(404).json({ error: "Звонок не найден" });
+
+    call.status = 'answered';
+    call.answerSdp = sdp;
+    res.json({ success: true });
+});
+
+//ОБМЕН ICE-КАНДИДАТАМИ ДЛЯ WebRTC
+app.post('/call/ice', (req, res) => {
+    const { callId, candidate } = req.body;
+    const call = activeCalls[callId];
+    if (!call) return res.status(404).json({ error: "Звонок не найден" });
+
+    if (candidate) call.iceCandidates.push(candidate);
+    res.json({ success: true });
+});
+// ЗАВЕРШЕНИЕ ИЛИ СБРОС ЗВОНКА В ЛЮБУЮ СЕКУНДУ
+app.post('/call/end', (req, res) => {
+    const { callId, reason, senderName } = req.body;
+    const call = activeCalls[callId];
+    if (call) {
+        call.status = 'ended';
+        
+        // Автоматически логируем системное сообщение в чат в зависимости от причины сброса
+        let logText = "📞 Звонок завершен";
+        if (reason === 'rejected') logText = "❌ Звонок отклонен";
+        if (reason === 'cancelled') logText = "🛑 Звонок отменен";
+
+        const systemMsg = {
+            id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
+            name: "Система",
+            senderId: call.from,
+            receiverId: call.to,
+            text: `${logText} (${call.type === 'video' ? 'Видео' : 'Аудио'})`,
+            timestamp: Date.now()
+        };
+        messagesHistory.push(systemMsg);
+        if (messagesHistory.length > 50) messagesHistory.shift();
+        saveHistory();
+        
+        delete activeCalls[callId];
+    }
+    res.json({ success: true });
+});
+
+// ПИНГ СЕТИ + ТАЙМАУТ ЗВОНКОВ (15 СЕКУНД ГУДКОВ)
+app.post('/ping', (req, res) => {
+    const { userId, name } = req.body;
+    const now = Date.now();
+
+    if (userId && name) {
+        let currentAvatar = null;
+        Object.keys(usersDatabase).forEach(key => {
+            if (usersDatabase[key].id === userId) currentAvatar = usersDatabase[key].avatar;
+        });
+        activeUsers[userId] = { name, avatar: currentAvatar, lastSeen: now };
+    }
+    
+    // Проверка онлайна (8 секунд отсутствия — офлайн)
+    Object.keys(activeUsers).forEach(id => {
+        if (now - activeUsers[id].lastSeen > 8000) delete activeUsers[id];
+    });
+
+    // Проверка таймаута звонков (15 секунд гудков)
+    Object.keys(activeCalls).forEach(callId => {
+        const call = activeCalls[callId];
+        if (call.status === 'ringing' && (now - call.timestamp > 15000)) {
+            call.status = 'ended';
+
+            // Создаем системное сообщение о пропущенном вызове
+            const missedMsg = {
+                id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
+                name: "Система",
+                senderId: call.from,
+                receiverId: call.to,
+                text: `❌ Пропущенный вызов (${call.type === 'video' ? 'Видео' : 'Аудио'})`,
+                timestamp: now
+            };
+            messagesHistory.push(missedMsg);
+            if (messagesHistory.length > 50) messagesHistory.shift();
+            saveHistory();
+
+            delete activeCalls[callId];
+        }
+    });
+
+    // Возвращаем клиенту список юзеров и текущие звонки для его ID
+    const myCalls = Object.values(activeCalls).filter(c => c.from === userId || c.to === userId);
+    res.json({ onlineUsers, activeCalls: myCalls });
+});
+
+// НОВОЕ СООБЩЕНИЕ В ЧАТ С ФИКСАЦИЕЙ ВРЕМЕНИ
 app.post('/message', (req, res) => {
     const data = req.body;
     if (data && data.senderId && data.receiverId && (data.text || data.file)) {
+        data.timestamp = Date.now(); // Жестко фиксируем время на сервере
         messagesHistory.push(data);
         if (messagesHistory.length > 50) messagesHistory.shift();
         saveHistory();
@@ -171,7 +266,7 @@ app.post('/message', (req, res) => {
     }
 });
 
-// УДAЛЕНИЕ СООБЩЕНИЯ
+// УДАЛЕНИЕ СООБЩЕНИЯ
 app.delete('/message/:id', (req, res) => {
     const messageId = req.params.id;
     const initialLength = messagesHistory.length;
@@ -185,4 +280,4 @@ app.delete('/message/:id', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Сервер мессенджера 4.5 запущен на порту ${PORT}`));
+server.listen(PORT, () => console.log(`Сервер мессенджера 5.5 (Звонки и Время) запущен на порту ${PORT}`));
