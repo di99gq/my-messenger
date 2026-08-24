@@ -6,18 +6,56 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
+
+// 🔐 БЕЗОПАСНЫЙ CORS - разрешаем только ваши домены
+const allowedOrigins = [
+    'https://di99gq.huggingface.co',  // 👈 ЗАМЕНИТЕ на ваш HuggingFace URL
+    'https://*.huggingface.co',
+    'https://di99gq.onrender.com'
+];
+
 const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+    cors: {
+        origin: function(origin, callback) {
+            // Разрешаем запросы без origin (например, мобильные приложения)
+            if (!origin) return callback(null, true);
+            if (allowedOrigins.some(allowed => origin.includes(allowed.replace('*', '')))) {
+                callback(null, true);
+            } else {
+                callback(new Error('Не разрешено CORS'));
+            }
+        },
+        methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        credentials: true
+    }
 });
 
 app.use(express.json({ limit: '50mb' }));
 
-// CORS
+// 🔒 БЕЗОПАСНЫЕ ЗАГОЛОВКИ
 app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
+    const origin = req.headers.origin;
+    if (origin && allowedOrigins.some(allowed => origin.includes(allowed.replace('*', '')))) {
+        res.header("Access-Control-Allow-Origin", origin);
+    }
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+    res.header("Access-Control-Allow-Credentials", "true");
+    
+    // 🛡️ Безопасные заголовки
+    res.header("X-Content-Type-Options", "nosniff");
+    res.header("X-Frame-Options", "DENY");
+    res.header("X-XSS-Protection", "1; mode=block");
+    
     if (req.method === 'OPTIONS') return res.sendStatus(200);
+    next();
+});
+
+// 🔒 ПРИНУДИТЕЛЬНОЕ ПЕРЕНАПРАВЛЕНИЕ НА HTTPS (для Render.com)
+app.use((req, res, next) => {
+    if (req.headers['x-forwarded-proto'] !== 'https' && process.env.NODE_ENV === 'production') {
+        return res.redirect(301, 'https://' + req.headers.host + req.url);
+    }
     next();
 });
 
@@ -29,7 +67,7 @@ const UNREAD_FILE = path.join(__dirname, 'unread.json');
 let messagesHistory = [];
 let usersDatabase = {}; 
 let groupsDatabase = {}; 
-let unreadDatabase = {}; // { userId: { chatId: count } }
+let unreadDatabase = {};
 let onlineUsersMap = new Map();
 
 // Чтение файлов
@@ -117,19 +155,16 @@ app.get('/users', (req, res) => {
     res.json(list);
 });
 
-// ИСТОРИЯ СООБЩЕНИЙ (исправлено для групп)
+// ИСТОРИЯ СООБЩЕНИЙ
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
     
-    // Если receiverId начинается с group_, значит это группа
     if (receiverId && receiverId.startsWith('group_')) {
-        // Возвращаем все сообщения, где receiverId === groupId
         const log = messagesHistory.filter(msg => msg.receiverId === receiverId);
         res.json(log);
         return;
     }
     
-    // Для личных чатов
     const log = messagesHistory.filter(msg => {
         if (receiverId === 'favorites') return msg.receiverId === 'favorites' && msg.senderId === senderId;
         return (msg.senderId === senderId && msg.receiverId === receiverId) || (msg.senderId === receiverId && msg.receiverId === senderId);
@@ -166,7 +201,6 @@ app.post('/create-group', (req, res) => {
     };
     saveGroups();
 
-    // Системное сообщение о создании группы
     const systemMsg = {
         id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
         senderId: 'system',
@@ -178,7 +212,6 @@ app.post('/create-group', (req, res) => {
     messagesHistory.push(systemMsg);
     saveHistory();
 
-    // Отправляем всем участникам
     groupsDatabase[groupId].members.forEach(userId => {
         const userSocketId = onlineUsersMap.get(userId);
         if (userSocketId) {
@@ -203,7 +236,6 @@ app.post('/group/:id/members', (req, res) => {
         group.members.push(userId);
         saveGroups();
 
-        // Системное сообщение о добавлении участника
         const user = usersDatabase[Object.keys(usersDatabase).find(key => usersDatabase[key].id === userId)];
         const systemMsg = {
             id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
@@ -216,7 +248,6 @@ app.post('/group/:id/members', (req, res) => {
         messagesHistory.push(systemMsg);
         saveHistory();
 
-        // Отправляем всем участникам группы
         group.members.forEach(memberId => {
             const memberSocketId = onlineUsersMap.get(memberId);
             if (memberSocketId) {
@@ -224,7 +255,6 @@ app.post('/group/:id/members', (req, res) => {
             }
         });
 
-        // Отправляем новому участнику группу
         const newMemberSocketId = onlineUsersMap.get(userId);
         if (newMemberSocketId) {
             io.to(newMemberSocketId).emit('group_added_to_chat', { id: group.id, name: group.name, avatar: group.avatar });
@@ -248,7 +278,6 @@ app.delete('/group/:id/members/:userId', (req, res) => {
     group.members = group.members.filter(u => u !== userId);
     saveGroups();
 
-    // Системное сообщение об удалении участника
     const user = usersDatabase[Object.keys(usersDatabase).find(key => usersDatabase[key].id === userId)];
     const systemMsg = {
         id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
@@ -261,7 +290,6 @@ app.delete('/group/:id/members/:userId', (req, res) => {
     messagesHistory.push(systemMsg);
     saveHistory();
 
-    // Отправляем всем участникам
     group.members.forEach(memberId => {
         const memberSocketId = onlineUsersMap.get(memberId);
         if (memberSocketId) {
@@ -357,10 +385,8 @@ io.on('connection', (socket) => {
         if (messagesHistory.length > 100) messagesHistory.shift();
         saveHistory();
 
-        // Всегда отправляем автору
         socket.emit('new_message', msgData);
 
-        // Если это группа — отправляем ВСЕМ участникам группы (кроме автора)
         if (msgData.receiverId.startsWith('group_')) {
             const group = groupsDatabase[msgData.receiverId];
             if (group) {
@@ -374,7 +400,6 @@ io.on('connection', (socket) => {
                 });
             }
         } else if (msgData.receiverId !== 'favorites') {
-            // Если личное сообщение — отправляем получателю
             const receiverSocketId = onlineUsersMap.get(msgData.receiverId);
             if (receiverSocketId) {
                 io.to(receiverSocketId).emit('new_message', msgData);
@@ -393,4 +418,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Сервер запущен на ${PORT}`));
+server.listen(PORT, () => console.log(`✅ Сервер запущен на ${PORT}`));
