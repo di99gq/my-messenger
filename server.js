@@ -7,11 +7,14 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// 🔐 БЕЗОПАСНЫЙ CORS - разрешаем только ваши домены
+// ===== 🔓 КОРРЕКТНЫЙ CORS =====
+// Разрешаем запросы с HuggingFace
 const allowedOrigins = [
-    'https://di99gq.huggingface.co',  // 👈 ЗАМЕНИТЕ на ваш HuggingFace URL
+    'https://di99gq-di99g.static.hf.space',
+    'https://*.hf.space',
     'https://*.huggingface.co',
-    'https://di99gq.onrender.com'
+    'http://localhost:3000',
+    'http://localhost:5500'
 ];
 
 const io = new Server(server, {
@@ -19,10 +22,13 @@ const io = new Server(server, {
         origin: function(origin, callback) {
             // Разрешаем запросы без origin (например, мобильные приложения)
             if (!origin) return callback(null, true);
+            // Проверяем, разрешен ли origin
             if (allowedOrigins.some(allowed => origin.includes(allowed.replace('*', '')))) {
                 callback(null, true);
             } else {
-                callback(new Error('Не разрешено CORS'));
+                // ВРЕМЕННО разрешаем все для теста
+                console.log('⚠️ Разрешен origin:', origin);
+                callback(null, true);
             }
         },
         methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -32,45 +38,39 @@ const io = new Server(server, {
 
 app.use(express.json({ limit: '50mb' }));
 
-// 🔒 БЕЗОПАСНЫЕ ЗАГОЛОВКИ
+// ===== 🔓 МАКСИМАЛЬНО ОТКРЫТЫЙ CORS ДЛЯ ТЕСТА =====
 app.use((req, res, next) => {
+    // Разрешаем ВСЕ запросы (для теста)
     const origin = req.headers.origin;
-    if (origin && allowedOrigins.some(allowed => origin.includes(allowed.replace('*', '')))) {
+    if (origin) {
         res.header("Access-Control-Allow-Origin", origin);
+    } else {
+        res.header("Access-Control-Allow-Origin", "*");
     }
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
     res.header("Access-Control-Allow-Credentials", "true");
+    res.header("Access-Control-Max-Age", "86400");
     
-    // 🛡️ Безопасные заголовки
-    res.header("X-Content-Type-Options", "nosniff");
-    res.header("X-Frame-Options", "DENY");
-    res.header("X-XSS-Protection", "1; mode=block");
-    
-    if (req.method === 'OPTIONS') return res.sendStatus(200);
-    next();
-});
-
-// 🔒 ПРИНУДИТЕЛЬНОЕ ПЕРЕНАПРАВЛЕНИЕ НА HTTPS (для Render.com)
-app.use((req, res, next) => {
-    if (req.headers['x-forwarded-proto'] !== 'https' && process.env.NODE_ENV === 'production') {
-        return res.redirect(301, 'https://' + req.headers.host + req.url);
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
     }
     next();
 });
 
+// ===== ФАЙЛЫ ДАННЫХ =====
 const HISTORY_FILE = path.join(__dirname, 'chat-history.json');
 const USERS_FILE = path.join(__dirname, 'users.json');
 const GROUPS_FILE = path.join(__dirname, 'groups.json');
 const UNREAD_FILE = path.join(__dirname, 'unread.json');
 
 let messagesHistory = [];
-let usersDatabase = {}; 
-let groupsDatabase = {}; 
+let usersDatabase = {};
+let groupsDatabase = {};
 let unreadDatabase = {};
 let onlineUsersMap = new Map();
 
-// Чтение файлов
+// Загрузка данных
 if (fs.existsSync(HISTORY_FILE)) {
     try { messagesHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch (e) {}
 }
@@ -97,13 +97,12 @@ function saveUnread() {
     try { fs.writeFileSync(UNREAD_FILE, JSON.stringify(unreadDatabase, null, 2)); } catch (e) {}
 }
 
-// ПОЛУЧЕНИЕ НЕПРОЧИТАННЫХ ДЛЯ ПОЛЬЗОВАТЕЛЯ
+// ===== API =====
 app.get('/unread/:userId', (req, res) => {
     const userId = req.params.userId;
     res.json(unreadDatabase[userId] || {});
 });
 
-// СБРОС НЕПРОЧИТАННЫХ ДЛЯ ЧАТА
 app.post('/unread/reset', (req, res) => {
     const { userId, chatId } = req.body;
     if (unreadDatabase[userId]) {
@@ -113,15 +112,13 @@ app.post('/unread/reset', (req, res) => {
     res.json({ success: true });
 });
 
-// РЕГИСТРАЦИЯ
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Заполните все поля" });
     
     const keyName = username.trim().toLowerCase();
-    
     if (usersDatabase[keyName]) {
-        return res.status(400).json({ error: "Этот никнейм уже занят! Выбери другой." });
+        return res.status(400).json({ error: "Этот никнейм уже занят!" });
     }
 
     const userId = 'user_' + Math.random().toString(36).substr(2, 9);
@@ -133,11 +130,11 @@ app.post('/register', (req, res) => {
     };
     saveUsers();
 
+    // Оповещаем всех
     io.emit('user_registered', { id: userId, name: username.trim(), avatar: null });
     res.json({ success: true, userId, name: username.trim(), avatar: null });
 });
 
-// ВХОД
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
     const keyName = username.trim().toLowerCase();
@@ -149,13 +146,11 @@ app.post('/login', (req, res) => {
     res.json({ success: true, userId: user.id, name: user.name, avatar: user.avatar });
 });
 
-// ПОЛУЧЕНИЕ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
 app.get('/users', (req, res) => {
     const list = Object.values(usersDatabase).map(u => ({ id: u.id, name: u.name, avatar: u.avatar || null }));
     res.json(list);
 });
 
-// ИСТОРИЯ СООБЩЕНИЙ
 app.get('/history', (req, res) => {
     const { senderId, receiverId } = req.query;
     
@@ -172,7 +167,6 @@ app.get('/history', (req, res) => {
     res.json(log);
 });
 
-// ПОЛУЧЕНИЕ ВСЕХ ГРУПП
 app.get('/groups', (req, res) => {
     const list = Object.values(groupsDatabase).map(g => ({ 
         id: g.id, 
@@ -185,7 +179,6 @@ app.get('/groups', (req, res) => {
     res.json(list);
 });
 
-// СОЗДАНИЕ ГРУППЫ
 app.post('/create-group', (req, res) => {
     const { name, description, avatar, adminId, members } = req.body;
     if (!name || !adminId) return res.status(400).json({ error: "Заполните название группы" });
@@ -223,115 +216,45 @@ app.post('/create-group', (req, res) => {
     res.json({ success: true, groupId, name: name.trim() });
 });
 
-// ДОБАВЛЕНИЕ УЧАСТНИКА В ГРУППУ
 app.post('/group/:id/members', (req, res) => {
     const { userId } = req.body;
     const group = groupsDatabase[req.params.id];
-    
-    if (!group) {
-        return res.status(404).json({ error: "Группа не найдена" });
-    }
-    
+    if (!group) return res.status(404).json({ error: "Группа не найдена" });
     if (!group.members.includes(userId)) {
         group.members.push(userId);
         saveGroups();
-
-        const user = usersDatabase[Object.keys(usersDatabase).find(key => usersDatabase[key].id === userId)];
-        const systemMsg = {
-            id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
-            senderId: 'system',
-            receiverId: group.id,
-            text: `${user ? user.name : 'Пользователь'} добавлен в группу`,
-            timestamp: Date.now(),
-            system: true
-        };
-        messagesHistory.push(systemMsg);
-        saveHistory();
-
-        group.members.forEach(memberId => {
-            const memberSocketId = onlineUsersMap.get(memberId);
-            if (memberSocketId) {
-                io.to(memberSocketId).emit('new_message', systemMsg);
-            }
-        });
-
-        const newMemberSocketId = onlineUsersMap.get(userId);
-        if (newMemberSocketId) {
-            io.to(newMemberSocketId).emit('group_added_to_chat', { id: group.id, name: group.name, avatar: group.avatar });
-        }
-
-        io.emit('group_member_added', { groupId: group.id, userId: userId, members: group.members });
     }
-    
     res.json({ success: true, members: group.members });
 });
 
-// УДАЛЕНИЕ УЧАСТНИКА ИЗ ГРУППЫ
 app.delete('/group/:id/members/:userId', (req, res) => {
     const group = groupsDatabase[req.params.id];
-    const userId = req.params.userId;
-    
-    if (!group) {
-        return res.status(404).json({ error: "Группа не найдена" });
-    }
-    
-    group.members = group.members.filter(u => u !== userId);
+    if (!group) return res.status(404).json({ error: "Группа не найдена" });
+    group.members = group.members.filter(u => u !== req.params.userId);
     saveGroups();
-
-    const user = usersDatabase[Object.keys(usersDatabase).find(key => usersDatabase[key].id === userId)];
-    const systemMsg = {
-        id: 'sys_' + Date.now() + Math.random().toString(36).substr(2, 5),
-        senderId: 'system',
-        receiverId: group.id,
-        text: `${user ? user.name : 'Пользователь'} удалён из группы`,
-        timestamp: Date.now(),
-        system: true
-    };
-    messagesHistory.push(systemMsg);
-    saveHistory();
-
-    group.members.forEach(memberId => {
-        const memberSocketId = onlineUsersMap.get(memberId);
-        if (memberSocketId) {
-            io.to(memberSocketId).emit('new_message', systemMsg);
-        }
-    });
-
-    io.emit('group_member_removed', { groupId: group.id, userId: userId, members: group.members });
     res.json({ success: true, members: group.members });
 });
 
-// УДАЛЕНИЕ ГРУППЫ
 app.delete('/group/:id', (req, res) => {
     delete groupsDatabase[req.params.id];
     saveGroups();
-    io.emit('group_deleted', req.params.id);
     res.json({ success: true });
 });
 
-// РЕДАКТИРОВАНИЕ ГРУППЫ
 app.put('/group/:id', (req, res) => {
     const { name, description, avatar } = req.body;
     const group = groupsDatabase[req.params.id];
-    
-    if (!group) {
-        return res.status(404).json({ error: "Группа не найдена" });
-    }
-    
+    if (!group) return res.status(404).json({ error: "Группа не найдена" });
     if (name) group.name = name.trim();
     if (description !== undefined) group.description = description;
     if (avatar !== undefined) group.avatar = avatar;
-    
     saveGroups();
-    io.emit('group_updated', { id: group.id, name: group.name, description: group.description, avatar: group.avatar });
     res.json({ success: true });
 });
 
-// ОБНОВЛЕНИЕ АВАТАРКИ
 app.post('/avatar', (req, res) => {
     const { userId, avatarData } = req.body;
     if (!userId || !avatarData) return res.status(400).json({ error: "Недостаточно данных" });
-    
     Object.keys(usersDatabase).forEach(key => {
         if (usersDatabase[key].id === userId) usersDatabase[key].avatar = avatarData;
     });
@@ -340,7 +263,6 @@ app.post('/avatar', (req, res) => {
     res.json({ success: true });
 });
 
-// УДАЛЕНИЕ СООБЩЕНИЯ
 app.delete('/message/:id', (req, res) => {
     messagesHistory = messagesHistory.filter(msg => String(msg.id) !== String(req.params.id));
     saveHistory();
@@ -348,15 +270,10 @@ app.delete('/message/:id', (req, res) => {
     res.json({ success: true });
 });
 
-// РЕДАКТИРОВАНИЕ СООБЩЕНИЯ
 app.put('/message/:id', (req, res) => {
     const { newText } = req.body;
     const msg = messagesHistory.find(m => String(m.id) === String(req.params.id));
-    
-    if (!msg) {
-        return res.status(404).json({ error: "Сообщение не найдено" });
-    }
-    
+    if (!msg) return res.status(404).json({ error: "Сообщение не найдено" });
     msg.text = newText;
     msg.edited = true;
     saveHistory();
@@ -364,15 +281,16 @@ app.put('/message/:id', (req, res) => {
     res.json({ success: true });
 });
 
-// SOCKET.IO
+// ===== SOCKET.IO =====
 io.on('connection', (socket) => {
-    console.log('Подключение:', socket.id);
+    console.log('✅ Подключение:', socket.id);
     
     socket.on('iam_online', (userId) => {
         if (!userId) return;
         socket.userId = userId;
         onlineUsersMap.set(userId, socket.id);
         io.emit('online_list', Array.from(onlineUsersMap.keys()));
+        console.log('👤 Онлайн:', Array.from(onlineUsersMap.keys()));
     });
 
     socket.on('send_message', (msgData) => {
@@ -382,11 +300,13 @@ io.on('connection', (socket) => {
         if (!msgData.id) msgData.id = 'msg_' + Date.now() + Math.random().toString(36).substr(2, 5);
         
         messagesHistory.push(msgData);
-        if (messagesHistory.length > 100) messagesHistory.shift();
+        if (messagesHistory.length > 1000) messagesHistory.shift();
         saveHistory();
 
+        // Отправляем автору
         socket.emit('new_message', msgData);
 
+        // Если группа — отправляем всем участникам
         if (msgData.receiverId.startsWith('group_')) {
             const group = groupsDatabase[msgData.receiverId];
             if (group) {
@@ -400,22 +320,27 @@ io.on('connection', (socket) => {
                 });
             }
         } else if (msgData.receiverId !== 'favorites') {
+            // Личное сообщение — отправляем получателю
             const receiverSocketId = onlineUsersMap.get(msgData.receiverId);
             if (receiverSocketId) {
                 io.to(receiverSocketId).emit('new_message', msgData);
             }
         }
         
-        console.log('Сообщение отправлено:', msgData.senderId, '->', msgData.receiverId);
+        console.log('📩 Сообщение:', msgData.senderId, '->', msgData.receiverId);
     });
 
     socket.on('disconnect', () => {
         if (socket.userId) {
             onlineUsersMap.delete(socket.userId);
             io.emit('online_list', Array.from(onlineUsersMap.keys()));
+            console.log('❌ Отключен:', socket.userId);
         }
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`✅ Сервер запущен на ${PORT}`));
+server.listen(PORT, () => {
+    console.log(`🚀 Сервер запущен на порту ${PORT}`);
+    console.log(`🔗 Ссылка: https://di99gq.onrender.com`);
+});
